@@ -1,28 +1,48 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Dashboard de Premiação", layout="wide")
+st.set_page_config(page_title="Dashboard de Premiação de Motoristas", layout="wide")
 
-st.title("🏆 Dashboard de Premiação")
+st.title("🏆 Dashboard de Premiação de Motoristas")
 
-# Upload dos arquivos do usuário
-st.sidebar.header("Arquivos de Entrada")
-file_vendas = st.sidebar.file_uploader("Upload: Vendas", type=["xlsx", "csv"])
-file_metas = st.sidebar.file_uploader("Upload: Metas", type=["xlsx", "csv"])
+# Insira aqui os links compartilhados do Google Drive
+LINK_ABASTECIMENTOS = "COLE_AQUI_O_LINK_DA_PLANILHA_DE_ABASTECIMENTOS"
+LINK_METAS = "COLE_AQUI_O_LINK_DA_PLANILHA_DE_METAS"
 
-if file_vendas and file_metas:
-    # Leitura dos arquivos
-    df_vendas = pd.read_excel(file_vendas) if file_vendas.name.endswith('.xlsx') else pd.read_csv(file_vendas)
-    df_metas = pd.read_excel(file_metas) if file_metas.name.endswith('.xlsx') else pd.read_csv(file_metas)
+def converter_link_drive(url):
+    """Converte o link de visualização do Google Drive em link de download direto"""
+    if "file/d/" in url:
+        file_id = url.split("file/d/")[1].split("/")[0]
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
 
-    # Processamento dos dados (cole aqui a sua lógica de tratamento)
-    st.success("Arquivos carregados com sucesso!")
+@st.cache_data(ttl=600)  # Atualiza os dados a cada 10 minutos
+def carregar_dados():
+    url_abastecimento = converter_link_drive(LINK_ABASTECIMENTOS)
+    url_metas = converter_link_drive(LINK_METAS)
     
-    # Exemplo de exibição de dados
-    st.subheader("Resultados das Metas")
-    st.dataframe(df_metas)
+    df_abastecimento = pd.read_excel(url_abastecimento)
+    df_metas = pd.read_excel(url_metas)
+    
+    return df_abastecimento, df_metas
 
-    st.subheader("Relatório de Vendas")
-    st.dataframe(df_vendas)
-else:
-    st.info("Por favor, faça o upload dos dois arquivos na barra lateral para carregar o painel.")
+try:
+    with st.spinner("Carregando planilhas diretamente do Google Drive..."):
+        df_abastecimento, df_metas = carregar_dados()
+    
+    st.success("Dados carregados com sucesso!")
+
+    # Exibição das abas com os dados
+    aba1, aba2 = st.tabs(["⛽ Dados de Abastecimento / Operação", "📊 Metas e Premiação"])
+    
+    with aba1:
+        st.subheader("Base de Abastecimentos")
+        st.dataframe(df_abastecimento, use_container_width=True)
+
+    with aba2:
+        st.subheader("Relatório de Premiação")
+        st.dataframe(df_metas, use_container_width=True)
+
+except Exception as e:
+    st.error("Erro ao carregar os arquivos do Google Drive. Verifique se os links estão com acesso público 'Qualquer pessoa com o link'.")
+    st.exception(e)
