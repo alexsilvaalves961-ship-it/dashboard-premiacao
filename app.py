@@ -165,27 +165,41 @@ class DataLoader:
 
     def carregar_cadastro_motoristas(self) -> pd.DataFrame:
         bruto = self._baixar_excel(self.config.LINK_MOTORISTAS, header=None)
-        cab_idx, linha_cab = None, None
-
-        for i in range(min(len(bruto), 15)):
-            vals = [str(x).strip().upper() for x in bruto.iloc[i].tolist()]
-            if "MOTORISTAS" in vals and "TIPO" in vals:
-                cab_idx, linha_cab = i, vals
+        
+        cab_idx = None
+        for i in range(min(len(bruto), 20)):
+            vals = [DataUtils.normalizar_texto(x) for x in bruto.iloc[i].tolist()]
+            linha_texto = " ".join(vals)
+            tem_motorista = any(m in linha_texto for m in ["MOTORISTA", "CONDUTOR", "NOME"])
+            tem_tipo = any(t in linha_texto for t in ["TIPO", "CATEGORIA", "VEICULO"])
+            
+            if tem_motorista and tem_tipo:
+                cab_idx = i
                 break
 
-        if cab_idx is None:
-            raise ValueError("Cabeçalho não encontrado no cadastro de motoristas.")
+        if cab_idx is not None:
+            df = self._baixar_excel(self.config.LINK_MOTORISTAS, header=cab_idx)
+        else:
+            df = self._baixar_excel(self.config.LINK_MOTORISTAS, header=0)
 
-        idx_mot = linha_cab.index("MOTORISTAS")
-        idx_tipo = linha_cab.index("TIPO")
-        idx_base = linha_cab.index("BASE") if "BASE" in linha_cab else None
+        col_mot = DataUtils.encontrar_coluna(df, ["MOTORISTA", "MOTORISTAS", "CONDUTOR", "NOME"])
+        col_tipo = DataUtils.encontrar_coluna(df, ["TIPO", "CATEGORIA", "TIPO VEICULO", "TIPO DE VEICULO"])
+        col_base = DataUtils.encontrar_coluna(df, ["BASE", "FILIAL", "UNIDADE"])
 
-        cadastro = bruto.iloc[cab_idx + 1:].copy()
-        cadastro["MOTORISTA_CADASTRO"] = cadastro.iloc[:, idx_mot].apply(DataUtils.normalizar_texto)
-        cadastro["TIPO_CADASTRO"] = cadastro.iloc[:, idx_tipo].apply(DataUtils.normalizar_texto).replace({"TOCO": "TRUCK"})
-        cadastro["BASE_CADASTRO"] = cadastro.iloc[:, idx_base].apply(DataUtils.normalizar_texto) if idx_base is not None else ""
+        if not col_mot or not col_tipo:
+            cadastro = pd.DataFrame({
+                "MOTORISTA_CADASTRO": df.iloc[:, 0].apply(DataUtils.normalizar_texto),
+                "TIPO_CADASTRO": df.iloc[:, 1].apply(DataUtils.normalizar_texto).replace({"TOCO": "TRUCK"}),
+                "BASE_CADASTRO": df.iloc[:, 2].apply(DataUtils.normalizar_texto) if df.shape[1] > 2 else "",
+            })
+        else:
+            cadastro = pd.DataFrame({
+                "MOTORISTA_CADASTRO": df[col_mot].apply(DataUtils.normalizar_texto),
+                "TIPO_CADASTRO": df[col_tipo].apply(DataUtils.normalizar_texto).replace({"TOCO": "TRUCK"}),
+                "BASE_CADASTRO": df[col_base].apply(DataUtils.normalizar_texto) if col_base else "",
+            })
+
         cadastro["EH_FOLGUISTA"] = cadastro["TIPO_CADASTRO"].eq("FOLGUISTA")
-
         cadastro = cadastro[(cadastro["MOTORISTA_CADASTRO"] != "") & (cadastro["TIPO_CADASTRO"] != "")]
         return cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last")
 
@@ -245,7 +259,6 @@ class CalculadorPremio:
         df["KM_ANTERIOR"] = df.groupby("PLACA_PADRONIZADA")["KM_ATUAL_NUM"].shift(1)
         df["KM_RODADO"] = df["KM_ATUAL_NUM"] - df["KM_ANTERIOR"]
 
-        # Filtra inconsistências de hodômetro (KM rodado negativo ou irrealista)
         df["KM_RODADO_VALIDO"] = np.where((df["KM_RODADO"] > 0) & (df["KM_RODADO"] < 5000), df["KM_RODADO"], np.nan)
         df["CONSUMO_KML"] = df["KM_RODADO_VALIDO"] / df["QTDE_NUM"]
 
@@ -258,7 +271,6 @@ class CalculadorPremio:
         df_precos: pd.DataFrame
     ) -> pd.DataFrame:
         
-        # Agrupa consumo por motorista
         resumo_mot = df_abast_proc.groupby("CONDUTOR_NORMALIZADO").agg(
             KM_TOTAL=("KM_RODADO_VALIDO", "sum"),
             LITROS_TOTAL=("QTDE_NUM", "sum"),
@@ -272,7 +284,6 @@ class CalculadorPremio:
             0.0
         )
 
-        # Cruzamento com Cadastro de Motoristas
         merged = pd.merge(
             resumo_mot,
             df_cadastro,
@@ -284,7 +295,6 @@ class CalculadorPremio:
         merged["TIPO_FINAL"] = merged["TIPO_CADASTRO"].fillna("NÃO CADASTRADO")
         merged["BASE_CADASTRO"] = merged["BASE_CADASTRO"].fillna("NÃO DEFINIDA")
 
-        # Cruzamento com Tabela de Preços/Metas
         final_df = pd.merge(
             merged,
             df_precos,
@@ -296,11 +306,10 @@ class CalculadorPremio:
         final_df["MEDIA_META"] = final_df["MEDIA"].fillna(0.0)
         final_df["VALOR_PREMIO_POTENCIAL"] = final_df["PREMIO"].fillna(0.0)
 
-        # Regra de Atingimento de Meta
         final_df["ATINGIU_META"] = (
             (final_df["MEDIA_ALCANCADA"] >= final_df["MEDIA_META"]) & 
             (final_df["MEDIA_META"] > 0) &
-            (final_df["KM_TOTAL"] >= 100)  # Exigência mínima de KM rodado
+            (final_df["KM_TOTAL"] >= 100)
         )
 
         final_df["PREMIO_RECEBER"] = np.where(
@@ -333,7 +342,6 @@ def main():
     config = AppConfig()
     loader = DataLoader(config)
 
-    # Carregamento de Dados com Cache
     @st.cache_data(ttl=600)
     def carregar_dados_completos():
         df_precos = loader.carregar_precos()
@@ -349,15 +357,11 @@ def main():
             st.error(f"Erro ao carregar os dados: {e}")
             st.stop()
 
-    # Processamento Inicial
     df_abast_proc = CalculadorPremio.processar_consumo_por_abastecimento(df_abast)
 
-    # ------------------------------------------------------------
     # FILTROS LATERAIS (SIDEBAR)
-    # ------------------------------------------------------------
     st.sidebar.header("🔍 Filtros de Pesquisa")
 
-    # Filtro de Data
     datas_validas = df_abast_proc["DATA_NUM"].dropna()
     min_date = datas_validas.min().date() if not datas_validas.empty else datetime.now().date()
     max_date = datas_validas.max().date() if not datas_validas.empty else datetime.now().date()
@@ -369,25 +373,19 @@ def main():
         max_value=max_date
     )
 
-    # Aplicação do Filtro de Data
     mask_data = (df_abast_proc["DATA_NUM"].dt.date >= data_inicio) & (df_abast_proc["DATA_NUM"].dt.date <= data_fim)
     df_abast_filtrado = df_abast_proc[mask_data]
 
-    # Filtro de Base
     bases_disponiveis = ["TODAS"] + sorted(list(df_cad["BASE_CADASTRO"].unique()))
     base_selecionada = st.sidebar.selectbox("Base Operacional", bases_disponiveis)
 
-    # Filtro de Tipo de Veículo
     tipos_disponiveis = ["TODOS"] + sorted(list(df_precos["TIPO"].unique()))
     tipo_selecionado = st.sidebar.selectbox("Tipo de Veículo", tipos_disponiveis)
 
-    # Busca por Motorista
     busca_motorista = st.sidebar.text_input("Buscar Motorista (Nome)")
 
-    # Cálculo da Premiação Final
     df_resultado = CalculadorPremio.calcular_premiacao_motoristas(df_abast_filtrado, df_cad, df_precos)
 
-    # Aplicando Filtros do Usuário
     if base_selecionada != "TODAS":
         df_resultado = df_resultado[df_resultado["BASE_CADASTRO"] == base_selecionada]
 
@@ -397,9 +395,7 @@ def main():
     if busca_motorista:
         df_resultado = df_resultado[df_resultado["CONDUTOR_NORMALIZADO"].str.contains(DataUtils.normalizar_texto(busca_motorista))]
 
-    # ------------------------------------------------------------
     # KPIS PRINCIPAIS
-    # ------------------------------------------------------------
     total_motoristas = len(df_resultado)
     premiados = len(df_resultado[df_resultado["ATINGIU_META"]])
     total_pago = df_resultado["PREMIO_RECEBER"].sum()
@@ -416,9 +412,7 @@ def main():
 
     st.markdown("---")
 
-    # ------------------------------------------------------------
-    # NAVEGAÇÃO POR ABAS
-    # ------------------------------------------------------------
+    # ABAS
     tab1, tab2, tab3, tab4 = st.tabs([
         "🏆 Ranking e Premiação",
         "📊 Análise por Tipo de Veículo",
@@ -426,7 +420,6 @@ def main():
         "📥 Exportar Relatórios"
     ])
 
-    # ABA 1: RANKING
     with tab1:
         st.subheader("Resultado de Eficiência e Premiação por Motorista")
 
@@ -456,11 +449,10 @@ def main():
             height=450
         )
 
-    # ABA 2: ANÁLISE POR VEÍCULO
     with tab2:
         st.subheader("Consumo Médio por Categoria de Veículo")
         resumo_veiculo = df_resultado.groupby("TIPO_FINAL").agg(
-            QTD_MOTORISTAS=("Motorista" if "Motorista" in df_resultado.columns else "CONDUTOR_NORMALIZADO", "count"),
+            QTD_MOTORISTAS=("CONDUTOR_NORMALIZADO", "count"),
             KM_TOTAL=("KM_TOTAL", "sum"),
             LITROS_TOTAL=("LITROS_TOTAL", "sum"),
             TOTAL_PREMIO=("PREMIO_RECEBER", "sum")
@@ -478,11 +470,9 @@ def main():
             use_container_width=True
         )
 
-    # ABA 3: AUDITORIA DE DADOS
     with tab3:
-        st.subheader("Abastecimentos com Inconsistências de Média ou Placa")
+        st.subheader("Abastecimentos Processados")
 
-        st.write("**Registros de Abastecimento Processados:**")
         st.dataframe(
             df_abast_filtrado[[
                 "DATA_NUM", "PLACA_PADRONIZADA", "CONDUTOR_NORMALIZADO",
@@ -491,13 +481,12 @@ def main():
             use_container_width=True
         )
 
-    # ABA 4: EXPORTAÇÃO
     with tab4:
         st.subheader("Download de Relatórios Formatados")
-        st.write("Clique no botão abaixo para gerar a planilha completa em formato Excel (.xlsx) com o resultado do filtro atual.")
+        st.write("Clique no botão abaixo para gerar a planilha em formato Excel (.xlsx).")
 
         bytes_excel = DataUtils.gerar_excel_download({
-            "Ranking_Premiação": df_resultado,
+            "Ranking_Premiaçao": df_resultado,
             "Resumo_Veiculos": resumo_veiculo,
             "Base_Abastecimentos": df_abast_filtrado
         })
