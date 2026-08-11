@@ -260,7 +260,10 @@ class CalculadorPremio:
         df["KM_RODADO"] = df["KM_ATUAL_NUM"] - df["KM_ANTERIOR"]
 
         df["KM_RODADO_VALIDO"] = np.where((df["KM_RODADO"] > 0) & (df["KM_RODADO"] < 5000), df["KM_RODADO"], np.nan)
-        df["CONSUMO_KML"] = df["KM_RODADO_VALIDO"] / df["QTDE_NUM"]
+        
+        # Divisão segura de consumo individual
+        litros_seguros = df["QTDE_NUM"].replace(0, np.nan)
+        df["CONSUMO_KML"] = df["KM_RODADO_VALIDO"] / litros_seguros
 
         return df.sort_values("_ORDEM_ORIGINAL")
 
@@ -278,6 +281,7 @@ class CalculadorPremio:
             TOTAL_ABASTECIMENTOS=("REGISTRO_VALIDO", "count")
         ).reset_index()
 
+        # Divisão segura de consumo por motorista
         resumo_mot["MEDIA_ALCANCADA"] = np.where(
             resumo_mot["LITROS_TOTAL"] > 0,
             resumo_mot["KM_TOTAL"] / resumo_mot["LITROS_TOTAL"],
@@ -318,11 +322,10 @@ class CalculadorPremio:
             0.0
         )
 
-        final_df["EFICIENCIA_PCT"] = np.where(
-            final_df["MEDIA_META"] > 0,
-            (final_df["MEDIA_ALCANCADA"] / final_df["MEDIA_META"]) * 100,
-            0.0
-        )
+        # CÁLCULO SEGURO DE EFICIÊNCIA (Evita ZeroDivisionError)
+        meta_segura = final_df["MEDIA_META"].replace(0, np.nan)
+        eficiencia = (final_df["MEDIA_ALCANCADA"] / meta_segura) * 100
+        final_df["EFICIENCIA_PCT"] = eficiencia.fillna(0.0)
 
         return final_df.sort_values(by="PREMIO_RECEBER", ascending=False)
 
@@ -376,10 +379,10 @@ def main():
     mask_data = (df_abast_proc["DATA_NUM"].dt.date >= data_inicio) & (df_abast_proc["DATA_NUM"].dt.date <= data_fim)
     df_abast_filtrado = df_abast_proc[mask_data]
 
-    bases_disponiveis = ["TODAS"] + sorted(list(df_cad["BASE_CADASTRO"].unique()))
+    bases_disponiveis = ["TODAS"] + sorted(list(df_cad["BASE_CADASTRO"].dropna().unique()))
     base_selecionada = st.sidebar.selectbox("Base Operacional", bases_disponiveis)
 
-    tipos_disponiveis = ["TODOS"] + sorted(list(df_precos["TIPO"].unique()))
+    tipos_disponiveis = ["TODOS"] + sorted(list(df_precos["TIPO"].dropna().unique()))
     tipo_selecionado = st.sidebar.selectbox("Tipo de Veículo", tipos_disponiveis)
 
     busca_motorista = st.sidebar.text_input("Buscar Motorista (Nome)")
@@ -395,17 +398,19 @@ def main():
     if busca_motorista:
         df_resultado = df_resultado[df_resultado["CONDUTOR_NORMALIZADO"].str.contains(DataUtils.normalizar_texto(busca_motorista))]
 
-    # KPIS PRINCIPAIS
+    # KPIS PRINCIPAIS (Divisão segura)
     total_motoristas = len(df_resultado)
     premiados = len(df_resultado[df_resultado["ATINGIU_META"]])
     total_pago = df_resultado["PREMIO_RECEBER"].sum()
     km_total_rodado = df_resultado["KM_TOTAL"].sum()
     litros_consumidos = df_resultado["LITROS_TOTAL"].sum()
-    media_geral_frota = km_total_rodado / litros_consumidos if litros_consumidos > 0 else 0.0
+    
+    media_geral_frota = (km_total_rodado / litros_consumidos) if litros_consumidos > 0 else 0.0
+    pct_premiados = (premiados / total_motoristas * 100) if total_motoristas > 0 else 0.0
 
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Motoristas Analisados", f"{total_motoristas}")
-    kpi2.metric("Motoristas Premiados", f"{premiados} ({ (premiados/total_motoristas*100) if total_motoristas else 0:.1f}%)")
+    kpi2.metric("Motoristas Premiados", f"{premiados} ({pct_premiados:.1f}%)")
     kpi3.metric("Total de Prêmios (R$)", f"R$ {total_pago:,.2f}")
     kpi4.metric("KM Total Rodado", f"{km_total_rodado:,.0f} km")
     kpi5.metric("Média Geral Frota", f"{media_geral_frota:.2f} km/l")
@@ -458,7 +463,8 @@ def main():
             TOTAL_PREMIO=("PREMIO_RECEBER", "sum")
         ).reset_index()
 
-        resumo_veiculo["MEDIA_CATEGORIA"] = resumo_veiculo["KM_TOTAL"] / resumo_veiculo["LITROS_TOTAL"]
+        litros_cat_seguros = resumo_veiculo["LITROS_TOTAL"].replace(0, np.nan)
+        resumo_veiculo["MEDIA_CATEGORIA"] = (resumo_veiculo["KM_TOTAL"] / litros_cat_seguros).fillna(0.0)
 
         st.dataframe(
             resumo_veiculo.style.format({
