@@ -121,21 +121,35 @@ class DataLoader:
         resp.raise_for_status()
         return pd.read_excel(io.BytesIO(resp.content), sheet_name=sheet_name, header=header)
 
-    def carregar_precos(self) -> pd.DataFrame:
+def carregar_precos(self) -> pd.DataFrame:
         df = self._baixar_excel(self.config.LINK_PRECOS, sheet_name=0)
-        col_tipo = DataUtils.encontrar_coluna(df, ["TIPO", "TIPO VEICULO", "TIPO DE VEICULO"])
-        col_media = DataUtils.encontrar_coluna(df, ["MEDIA", "MÉDIA"])
-        col_premio = DataUtils.encontrar_coluna(df, ["TOTAL", "PREMIO", "PRÊMIO", "VALOR"])
+        
+        col_tipo = DataUtils.encontrar_coluna(df, ["TIPO", "TIPO VEICULO", "TIPO DE VEICULO", "CATEGORIA"])
+        col_media = DataUtils.encontrar_coluna(df, ["MEDIA", "MÉDIA", "MEDIA OBJETIVO"])
+        col_premio = DataUtils.encontrar_coluna(df, ["TOTAL", "PREMIO", "PRÊMIO", "VALOR", "VALOR PREMIO"])
 
-        if None in (col_tipo, col_media, col_premio) and df.shape[1] == 5:
-            df = df.iloc[1:].copy()
-            df.columns = ["DEL", "TIPO", "FATOR", "MEDIA", "PREMIO"]
-            col_tipo, col_media, col_premio = "TIPO", "MEDIA", "PREMIO"
+        # Trata estrutura sem cabeçalho padrão
+        if None in (col_tipo, col_media, col_premio) and df.shape[1] >= 3:
+            # Caso a planilha venha sem nome de colunas reconhecido, tenta mapear por posição
+            df_temp = df.dropna(how="all").copy()
+            if len(df_temp.columns) >= 5:
+                df_temp = df_temp.iloc[1:].copy()
+                df_temp.columns = ["DEL", "TIPO", "FATOR", "MEDIA", "PREMIO"] + list(df_temp.columns[5:])
+                col_tipo, col_media, col_premio = "TIPO", "MEDIA", "PREMIO"
+                df = df_temp
+
+        # Validação de segurança para evitar crash silencioso
+        if col_tipo is None or col_tipo not in df.columns:
+            raise ValueError(
+                f"Não foi possível localizar a coluna de 'TIPO' na planilha de Preços. "
+                f"Colunas encontradas no arquivo baixado: {list(df.columns)}. "
+                f"Verifique se o link do Google Drive está liberado como 'Qualquer pessoa com o link'."
+            )
 
         resultado = pd.DataFrame({
             "TIPO": df[col_tipo].apply(DataUtils.normalizar_texto),
-            "MEDIA": df[col_media].apply(DataUtils.converter_numero),
-            "PREMIO": df[col_premio].apply(DataUtils.converter_numero),
+            "MEDIA": df[col_media].apply(DataUtils.converter_numero) if col_media else np.nan,
+            "PREMIO": df[col_premio].apply(DataUtils.converter_numero) if col_premio else 0.0,
         }).dropna(subset=["MEDIA", "PREMIO"])
 
         resultado["TIPO"] = resultado["TIPO"].replace({"TOCO": "TRUCK"})
