@@ -1,39 +1,34 @@
 import streamlit as st
 import pandas as pd
+import gdown
+import os
 
 st.set_page_config(page_title="Dashboard de Premiação de Motoristas", layout="wide")
 
 st.title("🏆 Dashboard de Premiação de Motoristas")
 
-# Insira aqui os links compartilhados do Google Drive
-LINK_ABASTECIMENTOS = "https://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=truehttps://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=true"
-LINK_METAS = "https://docs.google.com/spreadsheets/d/1vX2JqzFLcyDxytrBP5vbHCvMRJsRrm6M/edit?usp=drive_link&ouid=102045408189620250881&rtpof=true&sd=true"
+# Cole seus links públicos do Google Drive aqui
+LINK_ABASTECIMENTOS = "https://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=sharing&ouid=102045408189620250881&rtpof=true&sd=true"
+LINK_METAS = "https://docs.google.com/spreadsheets/d/1vX2JqzFLcyDxytrBP5vbHCvMRJsRrm6M/edit?usp=sharing&ouid=102045408189620250881&rtpof=true&sd=true"
 
-def converter_link_drive(url):
-    """Converte o link de visualização do Google Drive em link de download direto"""
-    if "file/d/" in url:
-        file_id = url.split("file/d/")[1].split("/")[0]
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-    return url
-
-@st.cache_data(ttl=600)  # Atualiza os dados a cada 10 minutos
-def carregar_dados():
-    url_abastecimento = converter_link_drive(LINK_ABASTECIMENTOS)
-    url_metas = converter_link_drive(LINK_METAS)
+@st.cache_data(ttl=600)
+def carregar_dados_drive(url, nome_arquivo_local):
+    """Baixa a planilha do Google Drive usando gdown e carrega no pandas"""
+    # Baixa o arquivo do Google Drive contornando telas de aviso
+    gdown.download(url=url, output=nome_arquivo_local, quiet=True, fuzzy=True)
     
-    df_abastecimento = pd.read_excel(url_abastecimento)
-    df_metas = pd.read_excel(url_metas)
-    
-    return df_abastecimento, df_metas
+    # Lê o arquivo Excel baixado
+    df = pd.read_excel(nome_arquivo_local)
+    return df
 
 try:
-    with st.spinner("Carregando planilhas diretamente do Google Drive..."):
-        df_abastecimento, df_metas = carregar_dados()
+    with st.spinner("Baixando e processando planilhas do Google Drive..."):
+        df_abastecimento = carregar_dados_drive(LINK_ABASTECIMENTOS, "abastecimentos.xlsx")
+        df_metas = carregar_dados_drive(LINK_METAS, "metas.xlsx")
     
     st.success("Dados carregados com sucesso!")
 
-    # Exibição das abas com os dados
-    aba1, aba2 = st.tabs(["⛽ Dados de Abastecimento / Operação", "📊 Metas e Premiação"])
+    aba1, aba2 = st.tabs(["⛽ Dados de Abastecimento", "📊 Metas e Premiação"])
     
     with aba1:
         st.subheader("Base de Abastecimentos")
@@ -44,5 +39,5 @@ try:
         st.dataframe(df_metas, use_container_width=True)
 
 except Exception as e:
-    st.error("Erro ao carregar os arquivos do Google Drive. Verifique se os links estão com acesso público 'Qualquer pessoa com o link'.")
+    st.error("Erro ao carregar os arquivos do Google Drive. Verifique se os links estão configurados com acesso público 'Qualquer pessoa com o link'.")
     st.exception(e)
