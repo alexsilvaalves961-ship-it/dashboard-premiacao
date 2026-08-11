@@ -15,7 +15,7 @@ def instalar_dependencias():
         if importlib.util.find_spec(pacote) is None:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pacote])
 
-instalar_dependencias()
+
 
 import numpy as np
 import pandas as pd
