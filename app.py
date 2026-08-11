@@ -1,84 +1,44 @@
+import importlib.util
+import io
 import os
 import re
-import io
-import requests
+import subprocess
+import sys
 import unicodedata
+from dataclasses import dataclass
 from typing import Optional, Tuple
+
+print("⏳ [1/5] Verificando e instalando bibliotecas...")
+def instalar_dependencias():
+    pacotes = ("pandas", "numpy", "openpyxl", "gradio", "requests")
+    for pacote in pacotes:
+        if importlib.util.find_spec(pacote) is None:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pacote])
+
+instalar_dependencias()
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+import requests
+import gradio as gr
 
 # ================================================================
-# CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# CONFIGURAÇÃO DE CAMINHOS E GOOGLE DRIVE (LINKS PÚBLICOS)
 # ================================================================
-st.set_page_config(
-    page_title="Painel do Prêmio de Motoristas",
-    page_icon="🚚",
-    layout="wide"
-)
+@dataclass
+class AppConfig:
+    LINK_PRECOS: str = "https://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=sharing"
+    LINK_FROTA: str = "https://docs.google.com/spreadsheets/d/1vX2JqzFLcyDxytrBP5vbHCvMRJsRrm6M/edit?usp=sharing"
+    LINK_MOTORISTAS: str = "https://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=sharing"
+    LINK_ABASTECIMENTOS: str = "https://docs.google.com/spreadsheets/d/1vX2JqzFLcyDxytrBP5vbHCvMRJsRrm6M/edit?usp=sharing"
 
-# Estilização CSS para aproximar o visual do Streamlit ao layout original
-st.markdown("""
-<style>
-    /* Estilo do Card do Cabeçalho */
-    .header-card {
-        background-color: #FFFFFF;
-        border-radius: 12px;
-        padding: 15px 25px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        border: 1px solid #E2E8F0;
-        margin-bottom: 20px;
-    }
-    
-    /* Logo Ciapetro */
-    .ciapetro-flag {
-        width: 140px; 
-        height: 38px; 
-        position: relative; 
-        border-radius: 4px; 
-        overflow: hidden; 
-        display: flex; 
-        flex-direction: column; 
-        border: 1px solid #CBD5E1;
-    }
-    .flag-blue-top { height: 33.3%; background-color: #0099DA; }
-    .flag-yellow { height: 33.3%; background-color: #FFD700; }
-    .flag-blue-bottom { height: 33.3%; background-color: #1E2B7A; }
-    .flag-text {
-        position: absolute; 
-        top: 50%; 
-        left: 50%; 
-        transform: translate(-50%, -50%); 
-        font-family: 'Arial Black', sans-serif; 
-        font-size: 14px; 
-        font-weight: 900; 
-        color: #FFFFFF; 
-        text-shadow: 1px 1px 2px #000;
-    }
-
-    /* Cartões de Métricas no Topo */
-    .kpi-box {
-        background-color: #F8FAFC;
-        border-radius: 8px;
-        padding: 10px 15px;
-        border: 1px solid #E2E8F0;
-    }
-    .kpi-title { font-size: 11px; font-weight: bold; color: #64748B; text-transform: uppercase; }
-    .kpi-value { font-size: 18px; font-weight: bold; color: #0F172A; margin-top: 2px; }
-
-    /* Estilo das Abas */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 15px;
-        border-bottom: 2px solid #E2E8F0;
-    }
-    .stTabs [data-baseweb="tab"] {
-        font-weight: 600;
-        font-size: 14px;
-        padding-bottom: 8px;
-    }
-</style>
-""", unsafe_allow_html=True)
+    @staticmethod
+    def extrair_url_export(url: str) -> str:
+        """Converte o link de compartilhamento do Google Drive em um link de exportação XLSX."""
+        if "/d/" in url:
+            file_id = url.split("/d/")[1].split("/")[0]
+            return f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+        return url
 
 
 # ================================================================
@@ -149,29 +109,20 @@ class DataUtils:
 
 
 # ================================================================
-# LINQUE E CARREGAMENTO DAS PLANILHAS
+# LEITURA DE PLANILHAS VIA GOOGLE DRIVE (HTTP)
 # ================================================================
-LINK_ABASTECIMENTOS = "https://docs.google.com/spreadsheets/d/1YZBLfxOgJinm1TJHYI49AEaOWVPmOEiA/edit?usp=sharing&ouid=102045408189620250881&rtpof=true&sd=true"
-LINK_METAS = "https://docs.google.com/spreadsheets/d/1vX2JqzFLcyDxytrBP5vbHCvMRJsRrm6M/edit?usp=sharing&ouid=102045408189620250881&rtpof=true&sd=true"
-
-def gerar_url_download_direto(url: str) -> str:
-    if "/d/" in url:
-        file_id = url.split("/d/")[1].split("/")[0]
-    elif "id=" in url:
-        file_id = url.split("id=")[1].split("&")[0]
-    else:
-        file_id = url
-    return f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
-
 class DataLoader:
-    def __init__(self, precos_src, frota_src, motoristas_src, abastecimentos_src):
-        self.precos_src = precos_src
-        self.frota_src = frota_src
-        self.motoristas_src = motoristas_src
-        self.abastecimentos_src = abastecimentos_src
+    def __init__(self, config: AppConfig):
+        self.config = config
+
+    def _baixar_excel(self, url: str, sheet_name=0, header=0) -> pd.DataFrame:
+        url_export = self.config.extrair_url_export(url)
+        resp = requests.get(url_export)
+        resp.raise_for_status()
+        return pd.read_excel(io.BytesIO(resp.content), sheet_name=sheet_name, header=header)
 
     def carregar_precos(self) -> pd.DataFrame:
-        df = pd.read_excel(self.precos_src, sheet_name="Planilha1")
+        df = self._baixar_excel(self.config.LINK_PRECOS, sheet_name=0)
         col_tipo = DataUtils.encontrar_coluna(df, ["TIPO", "TIPO VEICULO", "TIPO DE VEICULO"])
         col_media = DataUtils.encontrar_coluna(df, ["MEDIA", "MÉDIA"])
         col_premio = DataUtils.encontrar_coluna(df, ["TOTAL", "PREMIO", "PRÊMIO", "VALOR"])
@@ -191,7 +142,7 @@ class DataLoader:
         return resultado[resultado["TIPO"] != ""].reset_index(drop=True)
 
     def carregar_frota(self) -> Tuple[pd.DataFrame, dict]:
-        df = pd.read_excel(self.frota_src)
+        df = self._baixar_excel(self.config.LINK_FROTA)
         col_placa = DataUtils.encontrar_coluna(df, ["CAVALO", "PLACA", "PLACA CAVALO", "PLACA DO CAVALO"])
         col_tipo = DataUtils.encontrar_coluna(df, ["TIPO", "TIPO VEICULO", "TIPO DE VEICULO", "CATEGORIA"])
 
@@ -207,7 +158,7 @@ class DataLoader:
         return resultado, mapa
 
     def carregar_cadastro_motoristas(self) -> pd.DataFrame:
-        bruto = pd.read_excel(self.motoristas_src, header=None)
+        bruto = self._baixar_excel(self.config.LINK_MOTORISTAS, header=None)
         cab_idx, linha_cab = None, None
 
         for i in range(min(len(bruto), 15)):
@@ -233,7 +184,7 @@ class DataLoader:
         return cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last")
 
     def carregar_abastecimentos(self, mapa_frota: dict) -> pd.DataFrame:
-        df = pd.read_excel(self.abastecimentos_src)
+        df = self._baixar_excel(self.config.LINK_ABASTECIMENTOS)
 
         col_placa = DataUtils.encontrar_coluna(df, ["PLACA", "CAVALO"])
         col_km = DataUtils.encontrar_coluna(df, ["KM ATUAL", "KM", "KM_1", "QUILOMETRAGEM"])
@@ -277,7 +228,7 @@ class DataLoader:
 
 
 # ================================================================
-# MOTOR DE REGRAS E CÁLCULOS
+# CÁLCULO DE PREMIAÇÕES
 # ================================================================
 class RewardEngine:
     @staticmethod
@@ -380,7 +331,7 @@ class RewardEngine:
 
 
 # ================================================================
-# REGRAS DO PILAR 1 E FUNÇÕES DE RELATÓRIO / RECIBO
+# CONSTANTES DE CRITÉRIOS DE DESCLASSIFICAÇÃO (PILAR 1)
 # ================================================================
 CRITERIOS_PILAR_1 = [
     "1 - Controle de velocidade, limite máx de 80 km/h (1 Ponto/evento até 129)",
@@ -400,21 +351,22 @@ CRITERIOS_PILAR_1 = [
     "15 - Erros operacionais (Carregamento/Descarregamento incorreto ou Derramamento/Contaminação) [DESCLASSIFICADO]"
 ]
 
+# ================================================================
+# RECALCULO DE AUSÊNCIAS E DESCLASSIFICAÇÕES
+# ================================================================
 def aplicar_regras_gerais(df_resumo_original: pd.DataFrame, df_ausencias: pd.DataFrame, df_desclassificacoes: pd.DataFrame) -> pd.DataFrame:
-    if df_resumo_original.empty:
-        return df_resumo_original.copy()
-
     res = df_resumo_original.copy()
 
     motivos_iniciais = []
     for idx in res.index:
-        st_p = res.at[idx, "STATUS_PREMIO"]
-        if st_p == "DESCLASSIFICADO":
+        st = res.at[idx, "STATUS_PREMIO"]
+        if st == "DESCLASSIFICADO":
             motivos_iniciais.append("Média de consumo abaixo do limite mínimo da categoria")
         else:
             motivos_iniciais.append("Elegível / Em conformidade")
     res["MOTIVO_DESCLASSIFICACAO"] = motivos_iniciais
 
+    # 1. Aplicar ausências (Férias / Atestados)
     if not df_ausencias.empty:
         soma_dias = df_ausencias.groupby("MOTORISTA")["DIAS"].sum().to_dict()
         res["DIAS_AUSENCIA"] = res["MOTORISTA"].map(soma_dias).fillna(0).astype(int)
@@ -425,6 +377,7 @@ def aplicar_regras_gerais(df_resumo_original: pd.DataFrame, df_ausencias: pd.Dat
         res["DIAS_EFETIVOS"] = 30
         res["PREMIO"] = res["PREMIO_BRUTO"]
 
+    # 2. Aplicar Desclassificações (Pilar 1)
     if not df_desclassificacoes.empty:
         for idx in res.index:
             m_nome = res.at[idx, "MOTORISTA"]
@@ -453,6 +406,10 @@ def aplicar_regras_gerais(df_resumo_original: pd.DataFrame, df_ausencias: pd.Dat
 
     return res
 
+
+# ================================================================
+# GERADOR DE DATAFRAME EXCLUSIVO DO RH
+# ================================================================
 def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
     if df_resumo.empty:
         return pd.DataFrame(columns=["NOME", "FILIAL", "VALOR PAGO"])
@@ -463,6 +420,63 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
     rh_df["VALOR PAGO"] = df_resumo["PREMIO"].map(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     return rh_df
 
+
+# ================================================================
+# FILTRAGEM DO DASHBOARD
+# ================================================================
+def aplicar_filtros(motorista, placa, categoria, filial, df_resumo, df_eventos):
+    res_f = df_resumo.copy()
+    evt_f = df_eventos.copy()
+
+    if motorista and motorista != "TODOS":
+        m_norm = DataUtils.normalizar_texto(motorista)
+        res_f = res_f[res_f["MOTORISTA"].apply(DataUtils.normalizar_texto).str.contains(m_norm, na=False)]
+        evt_f = evt_f[evt_f["CONDUTOR_NORMALIZADO"].apply(DataUtils.normalizar_texto).str.contains(m_norm, na=False)]
+
+    if placa and placa.strip():
+        p_norm = DataUtils.padronizar_placa(placa)
+        res_f = res_f[res_f["PLACAS"].apply(DataUtils.padronizar_placa).str.contains(p_norm, na=False)]
+        evt_f = evt_f[evt_f["PLACA_PADRONIZADA"] == p_norm]
+
+    if categoria and categoria != "TODAS":
+        c_norm = DataUtils.normalizar_texto(categoria)
+        res_f = res_f[res_f["CATEGORIA"] == c_norm]
+        evt_f = evt_f[evt_f["TIPO_CALCULO"] == c_norm]
+
+    if filial and filial != "TODAS":
+        f_norm = DataUtils.normalizar_texto(filial)
+        res_f = res_f[res_f["BASE"].apply(DataUtils.normalizar_texto) == f_norm]
+        mots_da_filial = res_f["MOTORISTA"].apply(DataUtils.normalizar_texto).unique()
+        evt_f = evt_f[evt_f["CONDUTOR_NORMALIZADO"].apply(DataUtils.normalizar_texto).isin(mots_da_filial)]
+
+    tot_premio = res_f["PREMIO"].sum() if "PREMIO" in res_f.columns else 0.0
+    tot_km = res_f["KM_TOTAL"].sum() if "KM_TOTAL" in res_f.columns else 0.0
+    tot_litros = res_f["LITROS_TOTAL"].sum() if "LITROS_TOTAL" in res_f.columns else 0.0
+    tot_gasto_combustivel = evt_f["VALOR_NUM"].sum() if "VALOR_NUM" in evt_f.columns else 0.0
+    tot_media_geral = (tot_km / tot_litros) if tot_litros > 0 else 0.0
+    tot_mots = len(res_f)
+
+    res_view = res_f.copy()
+    if "PREMIO" in res_view.columns:
+        res_view["PREMIO"] = res_view["PREMIO"].map(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    if "MEDIA_CALCULADA" in res_view.columns:
+        res_view["MEDIA_CALCULADA"] = res_view["MEDIA_CALCULADA"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+
+    rh_view = gerar_tabela_rh(res_f)
+
+    f_premio = f"R$ {tot_premio:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    f_gasto_comb = f"R$ {tot_gasto_combustivel:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    f_km = f"{tot_km:,.1f} km".replace(",", "X").replace(".", ",").replace("X", ".")
+    f_litros = f"{tot_litros:,.1f} L".replace(",", "X").replace(".", ",").replace("X", ".")
+    f_media = f"{tot_media_geral:.2f} km/L".replace(".", ",")
+    f_mots = f"{tot_mots}"
+
+    return f_premio, f_gasto_comb, f_km, f_litros, f_media, f_mots, res_view, rh_view, evt_f
+
+
+# ================================================================
+# GERADOR DE RECIBOS DE PREMIAÇÃO
+# ================================================================
 def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini: str, periodo_fim: str, fator_c: str) -> str:
     base_val = row_data.get("BASE", "")
     if pd.isna(base_val) or str(base_val).strip() == "":
@@ -488,19 +502,23 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
     hdr_motivo_fg = "#FFFFFF" if eh_desclassificado else "#000000"
 
     return f"""
-    <div style="background-color: #FFFFFF; padding: 24px; border-radius: 12px; max-width: 650px; margin: 15px auto; font-family: Arial, sans-serif; color: #000000; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+    <div class="recibo-card" style="background-color: #FFFFFF; padding: 28px; border-radius: 12px; max-width: 650px; margin: 0 auto; font-family: Arial, sans-serif; color: #000000; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); page-break-after: always; break-after: page;">
         <div style="text-align: center; margin-bottom: 12px;">
             <div style="display: inline-block; width: 190px;">
                 <div style="width: 190px; height: 46px; position: relative; border-radius: 2px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid #CBD5E1;">
                     <div style="height: 33.3%; background-color: #0099DA;"></div>
                     <div style="height: 33.3%; background-color: #FFD700;"></div>
                     <div style="height: 33.3%; background-color: #1E2B7A;"></div>
-                    <span style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', sans-serif; font-size: 18px; font-weight: 900; color: #FFFFFF; text-shadow: 1px 1px 2px #000;">Ciapetro</span>
+                    <svg viewBox="0 0 24 24" style="position: absolute; top: 50%; left: 20px; transform: translateY(-50%); width: 24px; height: 24px;">
+                        <path fill="#0099DA" stroke="#FFFFFF" stroke-width="1.5" d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+                        <path fill="#FFFFFF" d="M10 8.5a2.5 2.5 0 0 0 2.5 2.5 0.7 0.7 0 0 0-1.4 0z"/>
+                    </svg>
+                    <span style="position: absolute; top: 50%; left: 105px; transform: translate(-50%, -50%); font-family: 'Arial Black', sans-serif; font-size: 20px; font-weight: 900; color: #1E2B7A;">Ciapetro</span>
                 </div>
             </div>
         </div>
 
-        <h3 style="text-align: center; margin: 10px 0 16px 0; font-size: 18px; font-weight: bold; color: #000000;">Recibo de Premiação</h3>
+        <h2 style="text-align: center; margin: 10px 0 16px 0; font-size: 18px; font-weight: bold; color: #000000;">Recibo de Premiação</h2>
 
         <table style="width: 100%; border-collapse: collapse; border: 2px solid #000000; font-size: 12px; font-weight: bold;">
             <tr style="border-bottom: 1px solid #000000;">
@@ -520,6 +538,18 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
                 <td style="padding: 4px 8px; text-align: center;">{dias_efetivos_val}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">OUTROS CONTROLES</td>
+                <td style="padding: 4px 8px; text-align: center;">0</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">JORNADA</td>
+                <td style="padding: 4px 8px; text-align: center;">0</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">EXCESSO DE VELOCIDADE</td>
+                <td style="padding: 4px 8px; text-align: center;">0</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">KM RODADO</td>
                 <td style="padding: 4px 8px; text-align: center;">{km_val}</td>
             </tr>
@@ -531,6 +561,30 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">FATOR CARGA</td>
                 <td style="padding: 4px 8px; text-align: center;">{fator_c}</td>
             </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">PONTOS NEG</td>
+                <td style="padding: 4px 8px; text-align: center;">0</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">CONTROLES</td>
+                <td style="padding: 4px 8px; text-align: center;">130</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR TOTAL CONTROLES</td>
+                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">% CONTROLES</td>
+                <td style="padding: 4px 8px; text-align: center;">100%</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">R$ CONTROLES</td>
+                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #000000;">
+                <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR MÉDIA</td>
+                <td style="padding: 4px 8px; text-align: center;">{val_total_str}</td>
+            </tr>
             <tr style="border-bottom: 1px solid #000000; background-color: {bg_motivo};">
                 <td style="background-color: {hdr_motivo_bg}; color: {hdr_motivo_fg}; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">MOTIVO DESCLASSIFICAÇÃO</td>
                 <td style="padding: 4px 8px; text-align: center; color: {fg_motivo}; font-weight: bold;">{motivo_descl}</td>
@@ -541,8 +595,8 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
             </tr>
         </table>
 
-        <p style="text-align: center; margin-top: 18px; margin-bottom: 20px; font-size: 11px; line-height: 1.4; color: #000000;">
-            Eu, <strong>{motorista_sel}</strong>, conferi e concordo com as informações, pois estão de acordo com a Política de Premiação dos Motoristas.
+        <p style="text-align: center; margin-top: 18px; margin-bottom: 20px; font-size: 11px; font-weight: normal; line-height: 1.4; color: #000000;">
+            Eu, <strong>{motorista_sel}</strong> ,Conferi e concordo com as informações, pois estão de acordo com a Política de Premiação dos Motoristas.
         </p>
 
         <div style="margin-top: 25px; text-align: left; font-size: 11px; color: #000000;">
@@ -550,7 +604,7 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
             <div style="margin-left: 35px; margin-top: 4px; font-weight: bold;">{motorista_sel}</div>
         </div>
 
-        <div style="margin-top: 15px; text-align: left; font-size: 11px; color: #000000;">
+        <div style="margin-top: 20px; text-align: left; font-size: 11px; color: #000000;">
             LOCAL/DATA _____________, ______/______/ 2026
         </div>
 
@@ -561,329 +615,399 @@ def gerar_html_unico_recibo(row_data: pd.Series, motorista_sel: str, periodo_ini
     """
 
 
-# ================================================================
-# GERENCIAMENTO DE ESTADO E CARREGAMENTO
-# ================================================================
-if "df_ausencias" not in st.session_state:
-    st.session_state.df_ausencias = pd.DataFrame(columns=["MOTORISTA", "TIPO_AUSENCIA", "DATA_INICIO", "DIAS", "OBSERVACAO"])
+def gerar_recibos_lote(filial_sel: str, motorista_sel: str, periodo_ini: str, periodo_fim: str, fator_c: str, df_resumo: pd.DataFrame) -> str:
+    if not motorista_sel or motorista_sel in ("SELECIONE...", ""):
+        return "<div style='text-align: center; padding: 40px; color: #64748B; font-size: 15px;'>👉 Por favor, selecione um motorista ou a opção de TODOS DA FILIAL para gerar os recibos.</div>"
 
-if "df_desclassificacoes" not in st.session_state:
-    st.session_state.df_desclassificacoes = pd.DataFrame(columns=["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "OBSERVACAO"])
+    res_f = df_resumo.copy()
 
-@st.cache_data(ttl=600, show_spinner=False)
-def carregar_dados_drive():
-    def obter_fonte(path_local, drive_link=None):
-        if os.path.exists(path_local):
-            return path_local
-        if drive_link:
-            try:
-                url_dl = gerar_url_download_direto(drive_link)
-                res = requests.get(url_dl)
-                if res.status_code == 200:
-                    return io.BytesIO(res.content)
-            except Exception:
-                return None
-        return None
+    if str(motorista_sel).startswith("TODOS"):
+        if filial_sel and filial_sel != "TODAS":
+            f_norm = DataUtils.normalizar_texto(filial_sel)
+            res_f = res_f[res_f["BASE"].apply(DataUtils.normalizar_texto) == f_norm]
 
-    src_p = obter_fonte("Pasta2.xlsx")
-    src_f = obter_fonte("frota.xlsx")
-    src_m = obter_fonte("Pasta4.xlsx", LINK_METAS)
-    src_a = obter_fonte("uah abastecimentos_3.xlsx", LINK_ABASTECIMENTOS)
+        lista_mots = sorted(list(res_f["MOTORISTA"].dropna().unique()))
+        if not lista_mots:
+            return f"<div style='text-align: center; padding: 40px; color: #EF4444;'>Nenhum motorista encontrado na filial '{filial_sel}'.</div>"
+    else:
+        lista_mots = [motorista_sel]
 
-    if not all([src_p, src_f, src_m, src_a]):
-        return None, None
+    recibos_html = []
 
-    loader = DataLoader(src_p, src_f, src_m, src_a)
-    engine = RewardEngine()
-
-    precos = loader.carregar_precos()
-    _, mapa_frota = loader.carregar_frota()
-    cadastro = loader.carregar_cadastro_motoristas()
-    abastecimentos = loader.carregar_abastecimentos(mapa_frota)
-
-    eventos = engine.calcular_eventos_consumo(abastecimentos)
-    resumo_base = engine.calcular_premios(eventos, precos, cadastro)
-
-    return resumo_base, eventos
-
-with st.spinner("⏳ Carregando dados de consumo e cadastros..."):
-    resumo_base, eventos = carregar_dados_drive()
-
-if resumo_base is None:
-    st.error("⚠️ Erro ao carregar planilhas locais ou do Google Drive. Verifique se os arquivos estão na pasta do app.")
-    st.stop()
-
-# Aplica ausências e infrações
-resumo_atualizado = aplicar_regras_gerais(resumo_base, st.session_state.df_ausencias, st.session_state.df_desclassificacoes)
-
-
-# ================================================================
-# 1. CABEÇALHO DO PAINEL (LOGO CIAPETRO + TÍTULO DA FOTO)
-# ================================================================
-st.markdown("""
-<div class="header-card">
-    <div style="display: flex; align-items: center; gap: 20px;">
-        <div class="ciapetro-flag">
-            <div class="flag-blue-top"></div>
-            <div class="flag-yellow"></div>
-            <div class="flag-blue-bottom"></div>
-            <span class="flag-text">Ciapetro</span>
-        </div>
-        <div>
-            <h2 style="margin: 0; font-size: 22px; font-weight: 800; color: #0F172A;">Painel do Prêmio de Motoristas</h2>
-            <p style="margin: 2px 0 0 0; font-size: 13px; color: #64748B;">Visão gerencial de consumo, desempenho e prêmio</p>
-        </div>
+    recibos_html.append(f"""
+    <div style="background: #F8FAFC; border: 1px solid #E2E8F0; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-size: 14px; font-weight: bold; color: #1E293B;">
+            📄 Total de Recibos Prontos: <span style="color: #2563EB;">{len(lista_mots)}</span>
+        </span>
+        <button onclick="window.print()" style="background-color: #2563EB; color: #FFFFFF; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            🖨️ Imprimir Todos os Recibos ({len(lista_mots)})
+        </button>
     </div>
-</div>
-""", unsafe_allow_html=True)
+    """)
+
+    for m_nome in lista_mots:
+        row = df_resumo[df_resumo["MOTORISTA"] == m_nome]
+        if not row.empty:
+            card_html = gerar_html_unico_recibo(row.iloc[0], m_nome, periodo_ini, periodo_fim, fator_c)
+            recibos_html.append(card_html)
+
+    return "<div style='display: flex; flex-direction: column; gap: 30px;'>" + "".join(recibos_html) + "</div>"
+
+
+def gerar_opcoes_exclusao_descl(df_descl: pd.DataFrame):
+    if df_descl.empty:
+        return gr.Dropdown(choices=["Nenhum registro para excluir"], value="Nenhum registro para excluir", interactive=False)
+    opcoes = []
+    for i, r in df_descl.iterrows():
+        mot = r["MOTORISTA"]
+        crit_curto = str(r["CRITERIO"]).split("-")[0].strip() if "-" in str(r["CRITERIO"]) else str(r["CRITERIO"])[:10]
+        opcoes.append(f"[{i}] {mot} - Critério {crit_curto}")
+    return gr.Dropdown(choices=opcoes, value=opcoes[0], interactive=True)
 
 
 # ================================================================
-# 2. FILTROS PRINCIPAIS NO CORPO (EXATAMENTE COMO NA FOTO)
+# EXECUÇÃO PRINCIPAL E MONTAGEM DA INTERFACE
 # ================================================================
-mots_lista = ["TODOS"] + sorted(list(resumo_atualizado["MOTORISTA"].dropna().unique()))
-cats_lista = ["TODAS"] + sorted(list(resumo_atualizado["CATEGORIA"].dropna().unique()))
-filiais_lista = ["TODAS"] + sorted([str(b) for b in resumo_atualizado["BASE"].dropna().unique() if str(b).strip() != ""])
+print("⏳ [2/5] Carregando planilhas do Google Drive via HTTP...")
+config = AppConfig()
 
-f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+loader = DataLoader(config)
+engine = RewardEngine()
 
-with f_col1:
-    f_mot = st.selectbox("👤 Filtrar Motorista", options=mots_lista, index=0)
-with f_col2:
-    f_plc = st.text_input("🔍 Filtrar Placa", placeholder="Ex: ABC1234 ou ABC1D23")
-with f_col3:
-    f_cat = st.selectbox("🏷️ Categoria de Veículo", options=cats_lista, index=0)
-with f_col4:
-    f_fil = st.selectbox("🏢 Filtrar Filial / Base", options=filiais_lista, index=0)
+print("⏳ [3/5] Lendo e cruzando dados dos motoristas e frota...")
+precos = loader.carregar_precos()
+frota, mapa_frota = loader.carregar_frota()
+cadastro = loader.carregar_cadastro_motoristas()
+abastecimentos = loader.carregar_abastecimentos(mapa_frota)
 
-# Filtragem lógica dos dados
-res_f = resumo_atualizado.copy()
-evt_f = eventos.copy() if eventos is not None else pd.DataFrame()
+print("⏳ [4/5] Processando consumo e calculando metas/premiações...")
+eventos = engine.calcular_eventos_consumo(abastecimentos)
+resumo_base = engine.calcular_premios(eventos, precos, cadastro)
 
-if f_mot != "TODOS":
-    m_norm = DataUtils.normalizar_texto(f_mot)
-    res_f = res_f[res_f["MOTORISTA"].apply(DataUtils.normalizar_texto).str.contains(m_norm, na=False)]
-    if not evt_f.empty:
-        evt_f = evt_f[evt_f["CONDUTOR_NORMALIZADO"].apply(DataUtils.normalizar_texto).str.contains(m_norm, na=False)]
+# TABELAS EM MEMÓRIA (AUSÊNCIAS E DESCLASSIFICAÇÕES)
+df_ausencias_global = pd.DataFrame(columns=["MOTORISTA", "TIPO_AUSENCIA", "DATA_INICIO", "DIAS", "OBSERVACAO"])
+df_desclassificacoes_global = pd.DataFrame(columns=["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "OBSERVACAO"])
 
-if f_plc.strip():
-    p_norm = DataUtils.padronizar_placa(f_plc)
-    res_f = res_f[res_f["PLACAS"].apply(DataUtils.padronizar_placa).str.contains(p_norm, na=False)]
-    if not evt_f.empty:
-        evt_f = evt_f[evt_f["PLACA_PADRONIZADA"] == p_norm]
+print("⏳ [5/5] Construindo a interface executiva...")
 
-if f_cat != "TODAS":
-    c_norm = DataUtils.normalizar_texto(f_cat)
-    res_f = res_f[res_f["CATEGORIA"] == c_norm]
-    if not evt_f.empty:
-        evt_f = evt_f[evt_f["TIPO_CALCULO"] == c_norm]
+mots_lista = ["TODOS"] + sorted(list(resumo_base["MOTORISTA"].dropna().unique()))
+cats_lista = ["TODAS"] + sorted(list(resumo_base["CATEGORIA"].dropna().unique()))
+filiais_lista = ["TODAS"] + sorted([str(b) for b in resumo_base["BASE"].dropna().unique() if str(b).strip() != ""])
+mots_opcao = sorted(list(resumo_base["MOTORISTA"].dropna().unique()))
+df_rh_inicial = gerar_tabela_rh(resumo_base)
 
-if f_fil != "TODAS":
-    f_norm = DataUtils.normalizar_texto(f_fil)
-    res_f = res_f[res_f["BASE"].apply(DataUtils.normalizar_texto) == f_norm]
+# MONTAGEM VISUAL ROBUSTA COM GRADIO
+with gr.Blocks(theme=gr.themes.Soft(), title="Dashboard do Prêmio de Motoristas") as app:
+
+    state_resumo = gr.State(value=resumo_base)
+    state_ausencias = gr.State(value=df_ausencias_global)
+    state_desclassificacoes = gr.State(value=df_desclassificacoes_global)
+
+    gr.HTML(
+        """
+        <div style="background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 16px; padding: 20px 28px; display: flex; align-items: center; gap: 24px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03); margin-bottom: 20px;">
+            <div style="display: flex; flex-direction: column; align-items: center; width: 95px; flex-shrink: 0;">
+                <div style="width: 85px; height: 42px; position: relative; border-radius: 2px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid #CBD5E1;">
+                    <div style="height: 33.3%; background-color: #0099DA;"></div>
+                    <div style="height: 33.3%; background-color: #FFD700;"></div>
+                    <div style="height: 33.3%; background-color: #1E2B7A;"></div>
+                    <svg viewBox="0 0 24 24" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 24px; height: 24px;">
+                        <path fill="#0099DA" stroke="#FFFFFF" stroke-width="1.5" d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+                        <path fill="#FFFFFF" d="M10 8.5a2.5 2.5 0 0 0 2.5 2.5 0.7 0.7 0 0 0-1.4 0z"/>
+                    </svg>
+                </div>
+                <span style="font-family: 'Arial Black', 'Helvetica Neue', sans-serif; font-weight: 900; color: #1E2B7A; font-size: 13px; margin-top: 3px; letter-spacing: -0.3px;">Ciapetro</span>
+                <span style="font-family: sans-serif; font-size: 5px; color: #475569; text-align: center; line-height: 1; margin-top: 0px; text-transform: uppercase;">Distribuidora de Combustíveis</span>
+            </div>
+
+            <div style="display: flex; flex-direction: column; justify-content: center;">
+                <h1 style="margin: 0; color: #0F172A; font-size: 26px; font-weight: 800; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; letter-spacing: -0.5px;">
+                    Dashboard do Prêmio de Motoristas
+                </h1>
+                <p style="margin: 4px 0 0 0; color: #64748B; font-size: 14px; font-weight: 400; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                    Visão gerencial de consumo, desempenho e prêmio
+                </p>
+            </div>
+        </div>
+        """
+    )
+
+    with gr.Row():
+        f_mot = gr.Dropdown(choices=mots_lista, value="TODOS", label="👤 Filtrar Motorista", filterable=True)
+        f_plc = gr.Textbox(label="🔍 Filtrar Placa", placeholder="Ex: ABC1234 ou ABC1D23")
+        f_cat = gr.Dropdown(choices=cats_lista, value="TODAS", label="🏷️ Categoria de Veículo")
+        f_fil = gr.Dropdown(choices=filiais_lista, value="TODAS", label="🏢 Filtrar Filial / Base", filterable=True)
+
+    with gr.Row():
+        btn_aplicar = gr.Button("⚡ Aplicar Filtros", variant="primary")
+        btn_limpar = gr.Button("🔄 Limpar", variant="secondary")
+
+    gr.Markdown("---")
+
+    with gr.Row():
+        kpi_p = gr.Textbox(label="💰 Total em Prêmios", value="R$ 0,00", interactive=False)
+        kpi_gasto_comb = gr.Textbox(label="💳 Total Gasto Combustível", value="R$ 0,00", interactive=False)
+        kpi_k = gr.Textbox(label="RODADO TOTAL (KM)", value="0 km", interactive=False)
+        kpi_l = gr.Textbox(label="⛽ COMBUSTÍVEL TOTAL", value="0 L", interactive=False)
+        kpi_avg = gr.Textbox(label="🎯 MÉDIA GERAL (KM/L)", value="0,00 km/L", interactive=False)
+        kpi_m = gr.Textbox(label="👥 MOTORISTAS NA LISTA", value="0", interactive=False)
+
+    gr.Markdown("---")
+
+    with gr.Tabs():
+        with gr.Tab("📊 Resumo de Premiações por Motorista"):
+            grid_resumo = gr.Dataframe(value=resumo_base, interactive=False)
+
+        with gr.Tab("👔 Relatório RH - Lançamento de Pagamento"):
+            gr.Markdown("### 👔 **Relatório RH - Pagamento de Prêmios**")
+            gr.Markdown("Relação simplificada de motoristas, filiais e valores devidos para lançamento na folha de pagamento pelo setor de RH.")
+            grid_rh = gr.Dataframe(value=df_rh_inicial, interactive=False)
+
+        with gr.Tab("📋 Detalhamento dos Abastecimentos"):
+            grid_eventos = gr.Dataframe(value=eventos, interactive=False)
+
+        with gr.Tab("📄 Recibo de Premiação"):
+            gr.Markdown("### 🖨️ **Gerador de Recibo de Premiação para Assinatura**")
+
+            opcoes_recibo_inic = ["SELECIONE...", "TODOS OS MOTORISTAS (TODAS AS FILIAIS)"] + sorted(list(resumo_base["MOTORISTA"].dropna().unique()))
+
+            with gr.Row():
+                rec_fil = gr.Dropdown(choices=filiais_lista, value="TODAS", label="🏢 Filtrar Filial / Base", filterable=True)
+                rec_mot = gr.Dropdown(choices=opcoes_recibo_inic, value="TODOS OS MOTORISTAS (TODAS AS FILIAIS)", label="👤 Selecionar Motorista", filterable=True)
+                rec_ini = gr.Textbox(label="📅 Período Início", value="26/06/2026")
+                rec_fim = gr.Textbox(label="📅 Período Fim", value="25/07/2026")
+
+            with gr.Row():
+                rec_fator = gr.Textbox(label="⚖️ Fator Carga", value="50%")
+                btn_recibo = gr.Button("📄 Gerar / Atualizar Recibo(s)", variant="primary")
+
+            recibo_output = gr.HTML(
+                value="<div style='text-align: center; padding: 40px; color: #64748B;'>👉 Selecione um motorista ou uma filial acima para gerar os recibos.</div>"
+            )
+
+        with gr.Tab("🏥 Lançamento de Atestados e Férias"):
+            gr.Markdown("### 🏥 **Lançamento de Ausências (Desconto de Atestados / Férias)**")
+            gr.Markdown("Os dias lançados aqui serão automaticamente descontados da quantidade de **dias efetivos** e do **valor final do prêmio** no dashboard e nos recibos.")
+
+            with gr.Row():
+                aus_mot = gr.Dropdown(choices=mots_opcao, label="👤 Motorista", filterable=True)
+                aus_tipo = gr.Radio(choices=["Atestado Médico", "Férias", "Outro Afastamento"], value="Atestado Médico", label="📌 Tipo de Ausência")
+                aus_data = gr.Textbox(label="📅 Data de Início", value="01/07/2026", placeholder="DD/MM/AAAA")
+                aus_dias = gr.Number(label="🔢 Dias Ausente", value=1, precision=0)
+
+            aus_obs = gr.Textbox(label="📝 Observação / Motivo", placeholder="Ex: CID 10, Licença médica, Férias regulamentares...")
+
+            with gr.Row():
+                btn_add_ausencia = gr.Button("➕ Lançar Ausência", variant="primary")
+                btn_limpar_ausencias = gr.Button("🗑️ Limpar Todos os Lançamentos", variant="stop")
+
+            gr.Markdown("#### 📋 **Histórico de Ausências Lançadas**")
+            grid_ausencias = gr.Dataframe(value=df_ausencias_global, interactive=False)
+
+        with gr.Tab("🚫 Gestão de Desclassificações (Pilar 1)"):
+            gr.Markdown("### 🚫 **1º Pilar - Controles Administrativos e Operacionais**")
+            gr.Markdown("Registrar infrações operacionais. Os critérios de **5 a 15** desclassificam o motorista diretamente. Já os critérios de **1 a 4** acumulam pontos (o acúmulo de **mais de 129 pontos** nestes critérios também gera a desclassificação automática com prêmio zerado em R$ 0,00).")
+
+            with gr.Row():
+                descl_mot = gr.Dropdown(choices=mots_opcao, label="👤 Motorista", filterable=True)
+                descl_crit = gr.Dropdown(choices=CRITERIOS_PILAR_1, value=CRITERIOS_PILAR_1[0], label="📌 Critério / Infração")
+                descl_pontos = gr.Number(label="🔢 Quantidade de Pontos / Eventos", value=1, precision=0)
+
+            descl_obs = gr.Textbox(label="📝 Observação / Detalhes da Infração", placeholder="Ex: Ocorrência de freada brusca gravada pela telemetria, não uso do cinto...")
+
+            with gr.Row():
+                btn_add_desclassificacao = gr.Button("🚫 Registrar Infração / Desclassificação", variant="primary")
+
+            gr.Markdown("---")
+            gr.Markdown("#### 📋 **Histórico de Desclassificações e Infrações Registradas**")
+            grid_desclassificacoes = gr.Dataframe(value=df_desclassificacoes_global, interactive=False)
+
+            with gr.Row():
+                descl_excluir_sel = gr.Dropdown(choices=["Nenhum registro para excluir"], value="Nenhum registro para excluir", label="🗑️ Selecionar Registro para Excluir", filterable=True, interactive=False)
+                btn_excluir_item_descl = gr.Button("🗑️ Excluir Registro Selecionado", variant="stop")
+                btn_limpar_desclassificacoes = gr.Button("⚠️ Limpar TODOS os Lançamentos", variant="secondary")
 
 
-# ================================================================
-# 3. CARTÕES DE MÉTRICAS / KPIS (LAYOUT DA FOTO)
-# ================================================================
-tot_premio = res_f["PREMIO"].sum() if "PREMIO" in res_f.columns else 0.0
-tot_km = res_f["KM_TOTAL"].sum() if "KM_TOTAL" in res_f.columns else 0.0
-tot_litros = res_f["LITROS_TOTAL"].sum() if "LITROS_TOTAL" in res_f.columns else 0.0
-tot_gasto = evt_f["VALOR_NUM"].sum() if not evt_f.empty and "VALOR_NUM" in evt_f.columns else 0.0
-tot_media = (tot_km / tot_litros) if tot_litros > 0 else 0.0
-tot_mots = len(res_f)
+    # ================================================================
+    # FUNÇÕES DE EVENTOS DO GRADIO
+    # ================================================================
 
-k1, k2, k3, k4, k5, k6 = st.columns(6)
+    # 1. ATUALIZAR DASHBOARD COMPLETO
+    def atualizar_dashboard(mot, plc, cat, fil, res_atual):
+        return aplicar_filtros(mot, plc, cat, fil, res_atual, eventos)
 
-with k1:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">💰 Total em Prêmios</div><div class="kpi-value">R$ {tot_premio:,.2f}</div></div>', unsafe_allow_html=True)
-with k2:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">💳 Total Gasto Combustível</div><div class="kpi-value">R$ {tot_gasto:,.2f}</div></div>', unsafe_allow_html=True)
-with k3:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">🛣️ TOTAL RODADO (KM)</div><div class="kpi-value">{tot_km:,.0f} km</div></div>', unsafe_allow_html=True)
-with k4:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">⛽ TOTAL COMBUSTÍVEL</div><div class="kpi-value">{tot_litros:,.0f} L</div></div>', unsafe_allow_html=True)
-with k5:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">🎯 MÉDIA GERAL (KM/L)</div><div class="kpi-value">{tot_media:.2f} km/L</div></div>', unsafe_allow_html=True)
-with k6:
-    st.markdown(f'<div class="kpi-box"><div class="kpi-title">👥 MOTORISTAS NA LISTA</div><div class="kpi-value">{tot_mots}</div></div>', unsafe_allow_html=True)
+    inputs_filtros = [f_mot, f_plc, f_cat, f_fil, state_resumo]
+    outputs_filtros = [kpi_p, kpi_gasto_comb, kpi_k, kpi_l, kpi_avg, kpi_m, grid_resumo, grid_rh, grid_eventos]
 
-st.markdown("<br>", unsafe_allow_html=True)
+    f_mot.change(fn=atualizar_dashboard, inputs=inputs_filtros, outputs=outputs_filtros)
+    f_plc.change(fn=atualizar_dashboard, inputs=inputs_filtros, outputs=outputs_filtros)
+    f_cat.change(fn=atualizar_dashboard, inputs=inputs_filtros, outputs=outputs_filtros)
+    f_fil.change(fn=atualizar_dashboard, inputs=inputs_filtros, outputs=outputs_filtros)
+    btn_aplicar.click(fn=atualizar_dashboard, inputs=inputs_filtros, outputs=outputs_filtros)
 
+    btn_limpar.click(
+        fn=lambda: ("TODOS", "", "TODAS", "TODAS"),
+        outputs=[f_mot, f_plc, f_cat, f_fil]
+    ).then(
+        fn=atualizar_dashboard,
+        inputs=inputs_filtros,
+        outputs=outputs_filtros
+    )
 
-# ================================================================
-# 4. AS 6 ABAS EXATAS DA SUAS IMAGENS DA FOTO
-# ================================================================
-aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
-    "📊 Resumo de Premiações por Motorista",
-    "👔 Relatório RH - Lançamento de Pagamento",
-    "📋 Detalhamento dos Abastecimentos",
-    "📄 Recibo de Premiação",
-    "🏥 Lançamento de Atestados e Férias",
-    "🚫 Gestão de Desclassificações (Pilar 1)"
-])
-
-# ----------------------------------------------------------------
-# ABA 1: RESUMO DE PREMIAÇÕES POR MOTORISTA
-# ----------------------------------------------------------------
-with aba1:
-    st.subheader("📊 Resumo de Premiações por Motorista")
-    
-    df_exibicao = res_f.copy()
-    if not df_exibicao.empty:
-        df_exibicao["PREMIO_FORMATADO"] = df_exibicao["PREMIO"].map(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        cols_ordem = ["MOTORISTA", "BASE", "CATEGORIA", "KM_TOTAL", "LITROS_TOTAL", "MEDIA_CALCULADA", "STATUS_PREMIO", "PREMIO_FORMATADO", "MOTIVO_DESCLASSIFICACAO"]
-        cols_presentes = [c for c in cols_ordem if c in df_exibicao.columns]
-        st.dataframe(df_exibicao[cols_presentes], use_container_width=True, height=450)
-    else:
-        st.info("Nenhum registro encontrado para os filtros selecionados.")
-
-# ----------------------------------------------------------------
-# ABA 2: RELATÓRIO RH - LANÇAMENTO DE PAGAMENTO
-# ----------------------------------------------------------------
-with aba2:
-    st.subheader("👔 Relatório RH - Lançamento de Pagamento")
-    st.caption("Relação simplificada enviada ao RH para lançamento em folha de pagamento.")
-    
-    df_rh = gerar_tabela_rh(res_f)
-    st.dataframe(df_rh, use_container_width=True, height=450)
-
-# ----------------------------------------------------------------
-# ABA 3: DETALHAMENTO DOS ABASTECIMENTOS
-# ----------------------------------------------------------------
-with aba3:
-    st.subheader("📋 Detalhamento dos Abastecimentos Processados")
-    if not evt_f.empty:
-        st.dataframe(evt_f, use_container_width=True, height=450)
-    else:
-        st.info("Nenhum abastecimento encontrado.")
-
-# ----------------------------------------------------------------
-# ABA 4: RECIBO DE PREMIAÇÃO
-# ----------------------------------------------------------------
-with aba4:
-    st.subheader("📄 Gerador de Recibo de Premiação")
-    
-    rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-    with rc1:
-        rec_filial = st.selectbox("Filial", options=filiais_lista, key="rec_filial_tab")
-    
-    mots_rec_opt = ["SELECIONE...", "TODOS OS MOTORISTAS"]
-    if rec_filial != "TODAS":
-        f_norm = DataUtils.normalizar_texto(rec_filial)
-        mots_rec_opt += sorted(list(resumo_atualizado[resumo_atualizado["BASE"].apply(DataUtils.normalizar_texto) == f_norm]["MOTORISTA"].dropna().unique()))
-    else:
-        mots_rec_opt += sorted(list(resumo_atualizado["MOTORISTA"].dropna().unique()))
-
-    with rc2:
-        rec_motorista = st.selectbox("Motorista", options=mots_rec_opt, key="rec_motorista_tab")
-    with rc3:
-        rec_ini = st.text_input("Data Início", value="26/06/2026")
-    with rc4:
-        rec_fim = st.text_input("Data Fim", value="25/07/2026")
-    with rc5:
-        rec_fator = st.text_input("Fator Carga", value="50%")
-
-    if rec_motorista != "SELECIONE...":
-        if rec_motorista == "TODOS OS MOTORISTAS":
-            sub_mots = resumo_atualizado["MOTORISTA"].unique()
+    # 2. FILTRAR MOTORISTAS DA GUIA DE RECIBO POR FILIAL
+    def atualizar_motoristas_recibo(filial, res_df):
+        if not filial or filial == "TODAS":
+            mots_f = sorted(list(res_df["MOTORISTA"].dropna().unique()))
+            opt_todos = "TODOS OS MOTORISTAS (TODAS AS FILIAIS)"
         else:
-            sub_mots = [rec_motorista]
+            f_norm = DataUtils.normalizar_texto(filial)
+            mots_f = sorted(list(res_df[res_df["BASE"].apply(DataUtils.normalizar_texto) == f_norm]["MOTORISTA"].dropna().unique()))
+            opt_todos = f"TODOS OS MOTORISTAS DA FILIAL ({filial})"
 
-        html_recibos = ""
-        for m_nome in sub_mots:
-            row_m = resumo_atualizado[resumo_atualizado["MOTORISTA"] == m_nome]
-            if not row_m.empty:
-                html_recibos += gerar_html_unico_recibo(row_m.iloc[0], m_nome, rec_ini, rec_fim, rec_fator)
-        
-        st.markdown(html_recibos, unsafe_allow_html=True)
-    else:
-        st.info("👉 Selecione um motorista para visualizar o recibo de pagamento.")
+        mots = ["SELECIONE...", opt_todos] + mots_f
+        return gr.Dropdown(choices=mots, value=opt_todos)
 
-# ----------------------------------------------------------------
-# ABA 5: LANÇAMENTO DE ATESTADOS E FÉRIAS
-# ----------------------------------------------------------------
-with aba5:
-    st.subheader("🏥 Lançamento de Atestados e Férias")
-    st.write("Registre os dias de ausência para cálculo proporcional da premiação.")
-    
-    with st.form("form_atestados", clear_on_submit=True):
-        a_col1, a_col2, a_col3 = st.columns(3)
-        with a_col1:
-            mot_aus = st.selectbox("Motorista", options=sorted(list(resumo_atualizado["MOTORISTA"].dropna().unique())))
-            tipo_aus = st.radio("Tipo de Ausência", ["Atestado Médico", "Férias", "Outro Afastamento"])
-        with a_col2:
-            dt_aus = st.text_input("Data Início", value="01/07/2026")
-            dias_aus = st.number_input("Dias Ausente", min_value=1, max_value=30, value=1)
-        with a_col3:
-            obs_aus = st.text_area("Observação / CID", placeholder="Detalhes do afastamento...")
-        
-        btn_add_aus = st.form_submit_button("➕ Registrar Ausência")
+    rec_fil.change(
+        fn=atualizar_motoristas_recibo,
+        inputs=[rec_fil, state_resumo],
+        outputs=rec_mot
+    )
 
-    if btn_add_aus:
-        nova_aus = pd.DataFrame([{
-            "MOTORISTA": mot_aus,
-            "TIPO_AUSENCIA": tipo_aus,
-            "DATA_INICIO": dt_aus,
-            "DIAS": int(dias_aus),
-            "OBSERVACAO": obs_aus
+    # 3. GERAR RECIBO(S)
+    recibo_inputs = [rec_fil, rec_mot, rec_ini, rec_fim, rec_fator, state_resumo]
+
+    btn_recibo.click(fn=gerar_recibos_lote, inputs=recibo_inputs, outputs=recibo_output)
+    rec_mot.change(fn=gerar_recibos_lote, inputs=recibo_inputs, outputs=recibo_output)
+
+    # 4. AÇÕES DE AUSÊNCIAS
+    def adicionar_ausencia(mot, tipo, dt, dias, obs, df_aus_atual, df_descl_atual, m_filtro, p_filtro, c_filtro, fil_filtro, r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft):
+        if not mot:
+            kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, resumo_base, eventos)
+            rec_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, resumo_base)
+            return df_aus_atual, resumo_base, df_aus_atual, *kpi_vals, rec_html
+
+        novo = pd.DataFrame([{
+            "MOTORISTA": mot,
+            "TIPO_AUSENCIA": tipo,
+            "DATA_INICIO": dt,
+            "DIAS": int(dias if dias else 1),
+            "OBSERVACAO": obs
         }])
-        st.session_state.df_ausencias = pd.concat([st.session_state.df_ausencias, nova_aus], ignore_index=True)
-        st.success(f"Ausência de {dias_aus} dia(s) gravada para {mot_aus}!")
-        st.rerun()
 
-    st.markdown("#### Histórico de Ausências Registradas")
-    st.dataframe(st.session_state.df_ausencias, use_container_width=True)
-    
-    if not st.session_state.df_ausencias.empty:
-        if st.button("🗑️ Limpar Atestados/Férias"):
-            st.session_state.df_ausencias = pd.DataFrame(columns=["MOTORISTA", "TIPO_AUSENCIA", "DATA_INICIO", "DIAS", "OBSERVACAO"])
-            st.rerun()
+        df_aus_novo = pd.concat([df_aus_atual, novo], ignore_index=True)
+        res_calculado = aplicar_regras_gerais(resumo_base, df_aus_novo, df_descl_atual)
 
-# ----------------------------------------------------------------
-# ABA 6: GESTÃO DE DESCLASSIFICAÇÕES (PILAR 1)
-# ----------------------------------------------------------------
-with aba6:
-    st.subheader("🚫 1º Pilar - Controles Administrativos e Operacionais")
-    st.caption("Registrador de infrações operacionais. Os critérios de 5 a 15 desclassificam o motorista diretamente. Já os critérios de 1 a 4 acumulam pontos (o acúmulo de mais de 129 pontos nestes critérios também gera a desclassificação automática).")
+        kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, res_calculado, eventos)
+        recibo_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, res_calculado)
 
-    with st.form("form_desclassificacoes", clear_on_submit=True):
-        d_col1, d_col2, d_col3 = st.columns([2, 3, 1])
-        with d_col1:
-            mot_descl = st.selectbox("👤 Motorista", options=sorted(list(resumo_atualizado["MOTORISTA"].dropna().unique())))
-        with d_col2:
-            crit_descl = st.selectbox("📌 Critério / Infração", options=CRITERIOS_PILAR_1)
-        with d_col3:
-            pts_descl = st.number_input("📊 Quantidade de Pontos / Eventos", min_value=1, value=1)
+        return df_aus_novo, res_calculado, df_aus_novo, *kpi_vals, recibo_html
 
-        obs_descl = st.text_input("📝 Observação / Detalhes da Infração", placeholder="Ex: Ocorrência de freada brusca gravada pela telemetria, não uso do cinto...")
-        
-        btn_add_descl = st.form_submit_button("🚫 Registrar Infração/Desclassificação")
+    def resetar_ausencias(df_descl_atual, m_filtro, p_filtro, c_filtro, fil_filtro, r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft):
+        df_vazio = pd.DataFrame(columns=["MOTORISTA", "TIPO_AUSENCIA", "DATA_INICIO", "DIAS", "OBSERVACAO"])
+        res_calculado = aplicar_regras_gerais(resumo_base, df_vazio, df_descl_atual)
 
-    if btn_add_descl:
-        num_crit = int(crit_descl.split("-")[0].strip()) if "-" in crit_descl else 1
-        eh_direto = num_crit >= 5
-        tipo_imp = "DESCLASSIFICADO" if eh_direto else "PONTUAÇÃO"
+        kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, res_calculado, eventos)
+        recibo_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, res_calculado)
 
-        nova_descl = pd.DataFrame([{
-            "MOTORISTA": mot_descl,
-            "CRITERIO": crit_descl,
-            "PONTOS": int(pts_descl),
-            "TIPO_IMPACTO": tipo_imp,
-            "OBSERVACAO": obs_descl
+        return df_vazio, res_calculado, df_vazio, *kpi_vals, recibo_html
+
+    out_regras_aus = [state_ausencias, state_resumo, grid_ausencias, kpi_p, kpi_gasto_comb, kpi_k, kpi_l, kpi_avg, kpi_m, grid_resumo, grid_rh, grid_eventos, recibo_output]
+
+    btn_add_ausencia.click(
+        fn=adicionar_ausencia,
+        inputs=[aus_mot, aus_tipo, aus_data, aus_dias, aus_obs, state_ausencias, state_desclassificacoes, f_mot, f_plc, f_cat, f_fil, rec_fil, rec_mot, rec_ini, rec_fim, rec_fator],
+        outputs=out_regras_aus
+    )
+
+    btn_limpar_ausencias.click(
+        fn=resetar_ausencias,
+        inputs=[state_desclassificacoes, f_mot, f_plc, f_cat, f_fil, rec_fil, rec_mot, rec_ini, rec_fim, rec_fator],
+        outputs=out_regras_aus
+    )
+
+    # 5. AÇÕES DE DESCLASSIFICAÇÃO (INCLUSÃO, EXCLUSÃO INDIVIDUAL E LIMPEZA)
+    def adicionar_desclassificacao(mot, crit, pontos, obs, df_aus_atual, df_descl_atual, m_filtro, p_filtro, c_filtro, fil_filtro, r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft):
+        if not mot:
+            kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, resumo_base, eventos)
+            rec_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, resumo_base)
+            opt_excl = gerar_opcoes_exclusao_descl(df_descl_atual)
+            return df_descl_atual, resumo_base, df_descl_atual, opt_excl, *kpi_vals, rec_html
+
+        num_crit = int(crit.split("-")[0].strip()) if "-" in crit else 1
+        eh_desclassificacao_direta = num_crit >= 5
+
+        tipo_impacto = "DESCLASSIFICADO" if eh_desclassificacao_direta else "PONTUAÇÃO"
+
+        novo = pd.DataFrame([{
+            "MOTORISTA": mot,
+            "CRITERIO": crit,
+            "PONTOS": int(pontos if pontos else 1),
+            "TIPO_IMPACTO": tipo_impacto,
+            "OBSERVACAO": obs
         }])
-        st.session_state.df_desclassificacoes = pd.concat([st.session_state.df_desclassificacoes, nova_descl], ignore_index=True)
-        st.success(f"Infração registrada para {mot_descl}!")
-        st.rerun()
 
-    st.markdown("#### Histórico de Desclassificações e Infrações Registradas")
-    st.dataframe(st.session_state.df_desclassificacoes, use_container_width=True)
+        df_descl_novo = pd.concat([df_descl_atual, novo], ignore_index=True)
+        res_calculado = aplicar_regras_gerais(resumo_base, df_aus_atual, df_descl_novo)
 
-    if not st.session_state.df_desclassificacoes.empty:
-        c_del1, c_del2 = st.columns([3, 1])
-        with c_del1:
-            idx_para_remover = st.selectbox("Selecione um registro para excluir", options=st.session_state.df_desclassificacoes.index)
-        with c_del2:
-            if st.button("🗑️ Excluir Registro"):
-                st.session_state.df_desclassificacoes = st.session_state.df_desclassificacoes.drop(idx_para_remover).reset_index(drop=True)
-                st.rerun()
+        kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, res_calculado, eventos)
+        recibo_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, res_calculado)
+        opt_excl = gerar_opcoes_exclusao_descl(df_descl_novo)
+
+        return df_descl_novo, res_calculado, df_descl_novo, opt_excl, *kpi_vals, recibo_html
+
+    def excluir_item_desclassificacao(item_sel, df_aus_atual, df_descl_atual, m_filtro, p_filtro, c_filtro, fil_filtro, r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft):
+        if not item_sel or "Nenhum" in item_sel or df_descl_atual.empty:
+            kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, resumo_base, eventos)
+            rec_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, resumo_base)
+            opt_excl = gerar_opcoes_exclusao_descl(df_descl_atual)
+            return df_descl_atual, resumo_base, df_descl_atual, opt_excl, *kpi_vals, rec_html
+
+        match = re.search(r"^\[(\d+)\]", item_sel)
+        if match:
+            idx_excluir = int(match.group(1))
+            if idx_excluir in df_descl_atual.index:
+                df_descl_novo = df_descl_atual.drop(idx_excluir).reset_index(drop=True)
+            else:
+                df_descl_novo = df_descl_atual
+        else:
+            df_descl_novo = df_descl_atual
+
+        res_calculado = aplicar_regras_gerais(resumo_base, df_aus_atual, df_descl_novo)
+        kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, res_calculado, eventos)
+        recibo_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, res_calculado)
+        opt_excl = gerar_opcoes_exclusao_descl(df_descl_novo)
+
+        return df_descl_novo, res_calculado, df_descl_novo, opt_excl, *kpi_vals, rec_html
+
+    def resetar_desclassificacoes(df_aus_atual, m_filtro, p_filtro, c_filtro, fil_filtro, r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft):
+        df_vazio = pd.DataFrame(columns=["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "OBSERVACAO"])
+        res_calculado = aplicar_regras_gerais(resumo_base, df_aus_atual, df_vazio)
+
+        kpi_vals = aplicar_filtros(m_filtro, p_filtro, c_filtro, fil_filtro, res_calculado, eventos)
+        recibo_html = gerar_recibos_lote(r_fil_sel, r_mot_sel, r_ini, r_fim, r_ft, res_calculado)
+        opt_excl = gerar_opcoes_exclusao_descl(df_vazio)
+
+        return df_vazio, res_calculado, df_vazio, opt_excl, *kpi_vals, recibo_html
+
+    out_descl = [state_desclassificacoes, state_resumo, grid_desclassificacoes, descl_excluir_sel, kpi_p, kpi_gasto_comb, kpi_k, kpi_l, kpi_avg, kpi_m, grid_resumo, grid_rh, grid_eventos, recibo_output]
+
+    btn_add_desclassificacao.click(
+        fn=adicionar_desclassificacao,
+        inputs=[descl_mot, descl_crit, descl_pontos, descl_obs, state_ausencias, state_desclassificacoes, f_mot, f_plc, f_cat, f_fil, rec_fil, rec_mot, rec_ini, rec_fim, rec_fator],
+        outputs=out_descl
+    )
+
+    btn_excluir_item_descl.click(
+        fn=excluir_item_desclassificacao,
+        inputs=[descl_excluir_sel, state_ausencias, state_desclassificacoes, f_mot, f_plc, f_cat, f_fil, rec_fil, rec_mot, rec_ini, rec_fim, rec_fator],
+        outputs=out_descl
+    )
+
+    btn_limpar_desclassificacoes.click(
+        fn=resetar_desclassificacoes,
+        inputs=[state_ausencias, f_mot, f_plc, f_cat, f_fil, rec_fil, rec_mot, rec_ini, rec_fim, rec_fator],
+        outputs=out_descl
+    )
+
+print("✅ Tudo pronto! Abrindo o painel...")
+app.launch(inline=True, share=True)
