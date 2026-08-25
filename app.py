@@ -2166,8 +2166,12 @@ st.markdown("""
 :root{--navy:#17215C;--blue:#0099DA;--gold:#F4C400;--bg:#E5EFF5;--muted:#5D7083;--line:#CBDCE5;}
 .stApp{background:linear-gradient(135deg,#E6F0F5 0%,#D8E8F0 55%,#EEF5F8 100%);}
 .block-container{max-width:1580px;padding-top:.7rem;padding-bottom:1.2rem;}
-section[data-testid="stSidebar"]{background:linear-gradient(180deg,#17215C 0%,#22377C 48%,#0E6D9A 100%);border-right:0;}
+section[data-testid="stSidebar"]{background:linear-gradient(180deg,#071033 0%,#0A1740 50%,#051126 100%);border-right:1px solid #1B2B5B;box-shadow:8px 0 24px rgba(5,17,38,.18);}
 section[data-testid="stSidebar"] *{color:#F6FBFF!important;}
+section[data-testid="stSidebar"] .stSelectbox label,section[data-testid="stSidebar"] .stTextInput label{color:#FFFFFF!important;font-weight:800!important;}
+section[data-testid="stSidebar"] [data-baseweb="select"]>div{background:#F8FBFF!important;color:#111827!important;border:1px solid #CBD5E1!important;border-radius:10px!important;}
+section[data-testid="stSidebar"] [data-baseweb="select"] span,section[data-testid="stSidebar"] [data-baseweb="select"] input{color:#111827!important;}
+section[data-testid="stSidebar"] input{background:#F8FBFF!important;color:#111827!important;border-radius:10px!important;border:1px solid #CBD5E1!important;}
 .hero{background:linear-gradient(135deg,#17215C 0%,#20438D 55%,#0099DA 100%);border-radius:22px;padding:18px 24px;margin-bottom:12px;box-shadow:0 11px 30px rgba(23,33,92,.18);color:#fff;}
 .hero h1{margin:0;color:#fff;font-size:1.85rem;font-weight:800}.hero p{margin:.25rem 0 0;color:#E3F6FF;font-size:.88rem}.logo-bar{display:flex;align-items:center;gap:14px}.logo{width:56px;height:56px;border-radius:15px;background:linear-gradient(180deg,#0099DA 0 33%,#FFD700 33% 66%,#17215C 66%);display:flex;align-items:center;justify-content:center;font-size:27px;box-shadow:0 5px 15px rgba(0,0,0,.18)}
 .kpi{background:rgba(255,255,255,.94);border:1px solid #D1E0E8;border-radius:16px;padding:12px 14px;box-shadow:0 6px 18px rgba(23,33,92,.07);min-height:80px}.kpi .label{color:#657487;font-size:.73rem;margin-bottom:4px}.kpi .value{color:#17215C;font-size:1.38rem;font-weight:850}
@@ -2285,9 +2289,9 @@ with st.sidebar:
     dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
 
     st.markdown(
-        f"<div style='background:#FFF8CC;border:1px solid #F4D03F;border-radius:10px;padding:10px 12px;margin:8px 0 14px 0;'>"
-        f"<div style='font-size:12px;color:#7A5D00;font-weight:700;'>PERÍODO SELECIONADO</div>"
-        f"<div style='font-size:15px;color:#1F2937;font-weight:800;'>{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}</div>"
+        f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
+        f"<div style='font-size:12px;color:#000000;font-weight:900;'>PERÍODO SELECIONADO</div>"
+        f"<div style='font-size:15px;color:#000000;font-weight:900;'>{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -2305,7 +2309,7 @@ kpis=st.columns(6)
 for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
     c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
 
-tabs=st.tabs(["📈 Dashboard Gráfico","📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações","🚨 Excesso de Velocidade","⏱️ Controle de Jornada"])
+tabs=st.tabs(["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","🚚 Múltiplas Placas","🏷️ Categorias por Placa","⚙️ Cadastros","📄 Recibos","🏥 Ausências","🚨 Excesso de Velocidade","⏱️ Controle de Jornada","🚫 Desclassificações","👔 Relatório RH"])
 with tabs[0]:
     st.markdown('<div class="dashboard-shell">', unsafe_allow_html=True)
     st.markdown("### 📈 Visão Gerencial da Competência")
@@ -2390,7 +2394,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Resumo de Premiações")
     st.dataframe(res_view,use_container_width=True,hide_index=True)
-with tabs[1]:
+with tabs[5]:
     st.subheader("Gestão de Cadastros")
 
     a, b = st.columns(2)
@@ -2577,10 +2581,10 @@ with tabs[1]:
     st.markdown("##### 🚚 Placas cadastradas")
     st.dataframe(frota_exib, use_container_width=True, hide_index=True)
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("Média separada por placa")
     st.dataframe(df_multi,use_container_width=True,hide_index=True)
-with tabs[3]:
+with tabs[4]:
     st.subheader("Categoria considerada para pagamento")
     st.caption("Defina a categoria de pagamento por motorista + placa. Os registros abaixo podem ser editados ou excluídos individualmente.")
 
@@ -2678,11 +2682,12 @@ with tabs[3]:
         )
     else:
         st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
-with tabs[4]:
+with tabs[11]:
     st.subheader("Relatório RH")
+    st.caption("Relatório de pagamento: considera o prêmio final apurado para cada motorista na competência selecionada, após todas as regras e descontos. Não é um demonstrativo de abastecimentos.")
     st.caption("Valores zerados são destacados em vermelho.")
     st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
-with tabs[5]:
+with tabs[2]:
     st.subheader("Detalhamento dos Abastecimentos")
     st.dataframe(det_view,use_container_width=True,hide_index=True)
 with tabs[6]:
@@ -2710,7 +2715,7 @@ with tabs[7]:
         opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
         if st.button("🗑️ Excluir registro selecionado",key="axx"):
             idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
-with tabs[8]:
+with tabs[10]:
     st.subheader("Gestão de Desclassificações (Pilar 1)")
     d_mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
     if d_mots:
@@ -2764,12 +2769,12 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
                 saver(st.session_state[df_key]); st.rerun()
 
 _render_eventos_pilar(
-    tabs[9], "🚨 Excesso de Velocidade",
+    tabs[8], "🚨 Excesso de Velocidade",
     "Até 30 eventos: desconto por evento. Mais de 30 eventos no período: perda integral do prêmio.",
     "excesso", "excesso_velocidade", salvar_excesso_velocidade, True
 )
 _render_eventos_pilar(
-    tabs[10], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
+    tabs[9], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
     "Cada evento desconta 1 ponto do prêmio. Com 130 eventos ou mais no período, o prêmio é perdido integralmente.",
     "jornada", "controle_jornada", salvar_controle_jornada, False
 )
