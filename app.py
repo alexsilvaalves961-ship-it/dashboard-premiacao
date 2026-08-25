@@ -273,6 +273,10 @@ def aplicar_descontos_eventos(df_resumo: pd.DataFrame, df_excesso: pd.DataFrame,
             res.at[idx,"PREMIO"] = 0.0
             res.at[idx,"STATUS_PREMIO"] = "DESCLASSIFICADO"
             res.at[idx,"MOTIVO_DESCLASSIFICACAO"] = f"Excesso de velocidade: {ex_n} eventos (>30) - prêmio perdido integralmente"
+        elif int(res.at[idx,"EVENTOS_CONTROLE_JORNADA"]) >= 130:
+            res.at[idx,"PREMIO"] = 0.0
+            res.at[idx,"STATUS_PREMIO"] = "DESCLASSIFICADO"
+            res.at[idx,"MOTIVO_DESCLASSIFICACAO"] = f"Controle de jornada: {int(res.at[idx,'EVENTOS_CONTROLE_JORNADA'])} eventos (>=130) - prêmio perdido integralmente"
         else:
             novo = max(0.0, premio - ex_d - jo_d)
             res.at[idx,"PREMIO"] = novo
@@ -2497,14 +2501,102 @@ with tabs[2]:
     st.dataframe(df_multi,use_container_width=True,hide_index=True)
 with tabs[3]:
     st.subheader("Categoria considerada para pagamento")
+    st.caption("Defina a categoria de pagamento por motorista + placa. Os registros abaixo podem ser editados ou excluídos individualmente.")
+
     mot_opts=sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else []
-    sm=st.selectbox("Motorista",mot_opts) if mot_opts else ""
+    sm=st.selectbox("Motorista",mot_opts,key="cat_mot_new") if mot_opts else ""
     plate_opts=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==sm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm else []
-    sp=st.selectbox("Placa",plate_opts) if plate_opts else ""
-    sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()))
+    sp=st.selectbox("Placa",plate_opts,key="cat_plate_new") if plate_opts else ""
+    sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()),key="cat_cat_new")
     if st.button("💾 Salvar categoria",key="savecat") and sm and sp:
-        st.session_state.mapa_cat_custom[normalizar_chave_categoria_customizada(sm,sp)]=DataUtils.normalizar_texto(sc); salvar_categorias_customizadas(st.session_state.mapa_cat_custom); st.rerun()
-    st.dataframe(pd.DataFrame(list(st.session_state.mapa_cat_custom.items()),columns=["MOTORISTA|||PLACA","CATEGORIA"]),use_container_width=True,hide_index=True)
+        st.session_state.mapa_cat_custom[normalizar_chave_categoria_customizada(sm,sp)]=DataUtils.normalizar_texto(sc)
+        salvar_categorias_customizadas(st.session_state.mapa_cat_custom)
+        st.success("Categoria salva com sucesso.")
+        st.rerun()
+
+    mapa_atual = st.session_state.mapa_cat_custom or {}
+    if mapa_atual:
+        df_cat_custom = pd.DataFrame(
+            [
+                {
+                    "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
+                    "PLACA": (str(chave).split("|||", 1)[1] if "|||" in str(chave) else ""),
+                    "CATEGORIA": str(valor),
+                    "_CHAVE": str(chave),
+                }
+                for chave, valor in mapa_atual.items()
+            ]
+        )
+
+        st.markdown("### 🛠️ Gerenciar categorias lançadas")
+        opcoes_cat = [
+            f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']}"
+            for i, row in df_cat_custom.reset_index(drop=True).iterrows()
+        ]
+        selecionado_cat = st.selectbox(
+            "Selecionar registro",
+            opcoes_cat,
+            key="cat_registro_sel",
+        )
+        idx_cat = int(selecionado_cat.split("]", 1)[0].replace("[", ""))
+        reg_cat = df_cat_custom.iloc[idx_cat]
+
+        ec1, ec2, ec3 = st.columns([2.2, 1.3, 1.5])
+        with ec1:
+            mot_edit = st.selectbox(
+                "Motorista",
+                mot_opts,
+                index=(mot_opts.index(reg_cat["MOTORISTA"]) if reg_cat["MOTORISTA"] in mot_opts else 0),
+                key="cat_mot_edit",
+            ) if mot_opts else ""
+        with ec2:
+            placas_edit = sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"] == mot_edit, "PLACA_PADRONIZADA"].dropna().unique().tolist()) if mot_edit else []
+            if reg_cat["PLACA"] and reg_cat["PLACA"] not in placas_edit:
+                placas_edit = [reg_cat["PLACA"]] + placas_edit
+            placa_edit = st.selectbox(
+                "Placa",
+                placas_edit,
+                index=(placas_edit.index(reg_cat["PLACA"]) if reg_cat["PLACA"] in placas_edit else 0),
+                key="cat_placa_edit",
+            ) if placas_edit else ""
+        with ec3:
+            categorias_edit = sorted(precos["TIPO"].unique().tolist())
+            categoria_edit = st.selectbox(
+                "Categoria",
+                categorias_edit,
+                index=(categorias_edit.index(reg_cat["CATEGORIA"]) if reg_cat["CATEGORIA"] in categorias_edit else 0),
+                key="cat_categoria_edit",
+            )
+
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", use_container_width=True):
+                chave_antiga = reg_cat["_CHAVE"]
+                chave_nova = normalizar_chave_categoria_customizada(mot_edit, placa_edit)
+                novo_mapa = dict(st.session_state.mapa_cat_custom)
+                if chave_antiga != chave_nova:
+                    novo_mapa.pop(chave_antiga, None)
+                novo_mapa[chave_nova] = DataUtils.normalizar_texto(categoria_edit)
+                st.session_state.mapa_cat_custom = novo_mapa
+                salvar_categorias_customizadas(novo_mapa)
+                st.success("Mapeamento atualizado com sucesso.")
+                st.rerun()
+        with ac2:
+            if st.button("🗑️ Excluir registro", key="cat_delete_btn", use_container_width=True):
+                chave_excluir = reg_cat["_CHAVE"]
+                novo_mapa = {k: v for k, v in st.session_state.mapa_cat_custom.items() if k != chave_excluir}
+                st.session_state.mapa_cat_custom = novo_mapa
+                salvar_categorias_customizadas(novo_mapa)
+                st.success("Mapeamento excluído com sucesso.")
+                st.rerun()
+
+        st.dataframe(
+            df_cat_custom.drop(columns=["_CHAVE"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
 with tabs[4]:
     st.subheader("Relatório RH")
     st.caption("Valores zerados são destacados em vermelho.")
@@ -2597,6 +2689,6 @@ _render_eventos_pilar(
 )
 _render_eventos_pilar(
     tabs[10], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
-    "Cada evento desconta 1 ponto do prêmio. Não há limite de desclassificação neste pilar.",
+    "Cada evento desconta 1 ponto do prêmio. Com 130 eventos ou mais no período, o prêmio é perdido integralmente.",
     "jornada", "controle_jornada", salvar_controle_jornada, False
 )
