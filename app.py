@@ -21,6 +21,18 @@ ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv"
 ARQUIVO_FROTA_CUSTOM = os.path.join(DATA_DIR, "frota_customizada.csv")
 ARQUIVO_MOTORISTAS_CUSTOM = os.path.join(DATA_DIR, "motoristas_customizados.csv")
 ARQUIVO_INATIVOS = os.path.join(DATA_DIR, "inativos.csv")
+ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
+ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
+
+VALOR_PONTO_POR_CATEGORIA = {
+    "TRUCK": 1.40,
+    "BITRUCK": 1.63,
+    "CARRETA": 1.87,
+    "BITREM": 2.10,
+    "RODOTREM": 2.45,
+    "RODOENTREGA": 2.45,
+}
+
 
 
 def garantir_diretorio():
@@ -178,6 +190,112 @@ def salvar_motoristas_customizados(df: pd.DataFrame):
   except Exception as e:
     print(f"Erro ao salvar motoristas customizados: {e}")
 
+
+def _carregar_eventos_pilar(caminho: str) -> pd.DataFrame:
+    colunas = ["MOTORISTA", "CATEGORIA", "DATA_EVENTO", "EVENTOS", "OBSERVACAO"]
+    if os.path.exists(caminho):
+        try:
+            df = pd.read_csv(caminho, dtype=str, encoding="utf-8-sig")
+            for c in colunas:
+                if c not in df.columns:
+                    df[c] = ""
+            df = df[colunas].copy()
+            df["EVENTOS"] = pd.to_numeric(df["EVENTOS"], errors="coerce").fillna(0).astype(int)
+            return df
+        except Exception as e:
+            print(f"Erro ao carregar eventos {caminho}: {e}")
+    return pd.DataFrame(columns=colunas)
+
+def _salvar_eventos_pilar(df: pd.DataFrame, caminho: str):
+    try:
+        garantir_diretorio()
+        df.to_csv(caminho, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"Erro ao salvar eventos {caminho}: {e}")
+
+def carregar_excesso_velocidade() -> pd.DataFrame:
+    return _carregar_eventos_pilar(ARQUIVO_EXCESSO_VELOCIDADE)
+
+def salvar_excesso_velocidade(df: pd.DataFrame):
+    _salvar_eventos_pilar(df, ARQUIVO_EXCESSO_VELOCIDADE)
+
+def carregar_controle_jornada() -> pd.DataFrame:
+    return _carregar_eventos_pilar(ARQUIVO_CONTROLE_JORNADA)
+
+def salvar_controle_jornada(df: pd.DataFrame):
+    _salvar_eventos_pilar(df, ARQUIVO_CONTROLE_JORNADA)
+
+def normalizar_categoria_evento(categoria: str) -> str:
+    c = DataUtils.normalizar_texto(categoria)
+    if "BITRUCK" in c: return "BITRUCK"
+    if "CARRETA" in c: return "CARRETA"
+    if "BITREM" in c: return "BITREM"
+    if "RODOTREM" in c: return "RODOTREM"
+    if "RODOENTREGA" in c or "RODO ENTREGA" in c: return "RODOENTREGA"
+    if "TRUCK" in c: return "TRUCK"
+    return c
+
+def valor_ponto_categoria(categoria: str) -> float:
+    return float(VALOR_PONTO_POR_CATEGORIA.get(normalizar_categoria_evento(categoria), 0.0))
+
+def aplicar_descontos_eventos(df_resumo: pd.DataFrame, df_excesso: pd.DataFrame, df_jornada: pd.DataFrame) -> pd.DataFrame:
+    res = df_resumo.copy()
+    if res.empty:
+        return res
+    for c in ["EVENTOS_EXCESSO_VELOCIDADE","DESCONTO_EXCESSO_VELOCIDADE","EVENTOS_CONTROLE_JORNADA","DESCONTO_CONTROLE_JORNADA"]:
+        res[c] = 0
+    for df, prefix in [(df_excesso, "EXCESSO"), (df_jornada, "JORNADA")]:
+        if df is None or df.empty:
+            continue
+        tmp = df.copy()
+        tmp["MOTORISTA_N"] = tmp["MOTORISTA"].apply(DataUtils.normalizar_texto)
+        tmp["EVENTOS"] = pd.to_numeric(tmp["EVENTOS"], errors="coerce").fillna(0)
+        tmp["VALOR_PONTO"] = tmp["CATEGORIA"].apply(valor_ponto_categoria)
+        tmp["DESCONTO"] = tmp["EVENTOS"] * tmp["VALOR_PONTO"]
+        agg = tmp.groupby("MOTORISTA_N").agg(EVENTOS=("EVENTOS","sum"), DESCONTO=("DESCONTO","sum"))
+        for idx in res.index:
+            m = DataUtils.normalizar_texto(res.at[idx,"MOTORISTA"])
+            if m in agg.index:
+                if prefix=="EXCESSO":
+                    res.at[idx,"EVENTOS_EXCESSO_VELOCIDADE"] = int(agg.at[m,"EVENTOS"])
+                    res.at[idx,"DESCONTO_EXCESSO_VELOCIDADE"] = float(agg.at[m,"DESCONTO"])
+                else:
+                    res.at[idx,"EVENTOS_CONTROLE_JORNADA"] = int(agg.at[m,"EVENTOS"])
+                    res.at[idx,"DESCONTO_CONTROLE_JORNADA"] = float(agg.at[m,"DESCONTO"])
+    for idx in res.index:
+        ex_n = int(res.at[idx,"EVENTOS_EXCESSO_VELOCIDADE"])
+        ex_d = float(res.at[idx,"DESCONTO_EXCESSO_VELOCIDADE"])
+        jo_d = float(res.at[idx,"DESCONTO_CONTROLE_JORNADA"])
+        premio = float(res.at[idx,"PREMIO"])
+        if ex_n > 30:
+            res.at[idx,"PREMIO"] = 0.0
+            res.at[idx,"STATUS_PREMIO"] = "DESCLASSIFICADO"
+            res.at[idx,"MOTIVO_DESCLASSIFICACAO"] = f"Excesso de velocidade: {ex_n} eventos (>30) - prêmio perdido integralmente"
+        else:
+            novo = max(0.0, premio - ex_d - jo_d)
+            res.at[idx,"PREMIO"] = novo
+            partes=[]
+            if ex_n: partes.append(f"Excesso de velocidade: -R$ {ex_d:.2f} ({ex_n} eventos)")
+            jo_n=int(res.at[idx,"EVENTOS_CONTROLE_JORNADA"])
+            if jo_n: partes.append(f"Controle de jornada: -R$ {jo_d:.2f} ({jo_n} eventos)")
+            if partes:
+                base=str(res.at[idx,"MOTIVO_DESCLASSIFICACAO"])
+                if base=="Elegível / Em conformidade": base=""
+                res.at[idx,"MOTIVO_DESCLASSIFICACAO"]=" | ".join([x for x in [base,*partes] if x])
+    return res
+
+def recalcular_saida_dashboard(current_tuple, df_excesso, df_jornada):
+    vals=list(current_tuple)
+    res_f=aplicar_descontos_eventos(vals[-1], df_excesso, df_jornada)
+    premio=float(res_f["PREMIO"].sum()) if not res_f.empty else 0.0
+    vals[0]=f"R$ {premio:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+    rv=res_f.copy()
+    if not rv.empty and "PREMIO" in rv.columns:
+        rv["PREMIO"]=rv["PREMIO"].map(lambda x:f"R$ {float(x):,.2f}".replace(",","X").replace(".",",").replace("X","."))
+    vals[6]=rv
+    vals[7]=gerar_tabela_rh(res_f)
+    vals[-1]=res_f
+    return tuple(vals)
 
 def carregar_inativos() -> dict:
   """Carrega as placas e motoristas marcados como INATIVOS do arquivo CSV."""
@@ -1924,6 +2042,8 @@ config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eve
 if "ausencias" not in st.session_state: st.session_state.ausencias = carregar_ausencias()
 if "desclassificacoes" not in st.session_state: st.session_state.desclassificacoes = carregar_desclassificacoes()
 if "mapa_cat_custom" not in st.session_state: st.session_state.mapa_cat_custom = carregar_categorias_customizadas()
+if "excesso_velocidade" not in st.session_state: st.session_state.excesso_velocidade = carregar_excesso_velocidade()
+if "controle_jornada" not in st.session_state: st.session_state.controle_jornada = carregar_controle_jornada()
 
 datas_validas = abastecimentos["DATA_FILTRO"].dropna() if "DATA_FILTRO" in abastecimentos.columns else eventos["DATA_NUM"].dropna()
 min_dt = datas_validas.min().date() if not datas_validas.empty else date(2026,1,1)
@@ -1932,7 +2052,25 @@ max_dt = datas_validas.max().date() if not datas_validas.empty else date(2026,12
 def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
     di = dt_ini.strftime('%d/%m/%Y') if isinstance(dt_ini, date) else str(dt_ini)
     df = dt_fim.strftime('%d/%m/%Y') if isinstance(dt_fim, date) else str(dt_fim)
-    return aplicar_filtros(di, df, motorista, placa, categoria, filial, st.session_state.ausencias, st.session_state.desclassificacoes, st.session_state.mapa_cat_custom)
+    base = aplicar_filtros(di, df, motorista, placa, categoria, filial, st.session_state.ausencias, st.session_state.desclassificacoes, st.session_state.mapa_cat_custom)
+    def _eventos_no_periodo(df_eventos):
+        if df_eventos is None or df_eventos.empty:
+            return df_eventos
+        tmp = df_eventos.copy()
+        datas = tmp["DATA_EVENTO"].apply(parse_data_filtro)
+        ini = pd.Timestamp(dt_ini).normalize() if isinstance(dt_ini, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_ini)
+        fim = pd.Timestamp(dt_fim).normalize() if isinstance(dt_fim, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_fim)
+        mask = datas.notna()
+        if ini is not None and pd.notna(ini):
+            mask &= datas >= pd.Timestamp(ini).normalize()
+        if fim is not None and pd.notna(fim):
+            mask &= datas <= pd.Timestamp(fim).normalize()
+        return tmp.loc[mask].copy()
+    return recalcular_saida_dashboard(
+        base,
+        _eventos_no_periodo(st.session_state.excesso_velocidade),
+        _eventos_no_periodo(st.session_state.controle_jornada),
+    )
 
 def ausencia_label(i, row):
     return f"[{i}] {row.get('MOTORISTA','')} — {row.get('TIPO_AUSENCIA','')} — {row.get('DATA_INICIO','')} até {row.get('DATA_FIM','')} ({row.get('DIAS',0)} dias)"
@@ -1966,7 +2104,7 @@ kpis=st.columns(6)
 for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
     c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
 
-tabs=st.tabs(["📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações"])
+tabs=st.tabs(["📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações","🚨 Excesso de Velocidade","⏱️ Controle de Jornada"])
 with tabs[0]:
     st.subheader("Resumo de Premiações")
     st.dataframe(res_view,use_container_width=True,hide_index=True)
@@ -2158,3 +2296,53 @@ with tabs[8]:
         if st.button("🗑️ Excluir registro selecionado",key="dxx"):
             idx=int(sel.split(']')[0].replace('[','')); st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
 
+def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False):
+    with tab:
+        st.subheader(titulo)
+        st.info(info)
+        st.caption("TRUCK R$ 1,40 | BITRUCK R$ 1,63 | CARRETA R$ 1,87 | BITREM R$ 2,10 | RODOTREM/RODOENTREGA R$ 2,45")
+        mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
+        if mots:
+            with st.form(f"form_{key_prefix}", clear_on_submit=True):
+                c1,c2,c3=st.columns(3)
+                with c1: mot_e=st.selectbox("Motorista",mots,key=f"{key_prefix}_mot")
+                mot_row=res_f[res_f["MOTORISTA"]==mot_e] if not res_f.empty else pd.DataFrame()
+                cat_default=mot_row["CATEGORIA"].iloc[0] if not mot_row.empty else (cats_lista[1] if len(cats_lista)>1 else "TRUCK")
+                cat_opts=sorted(set(list(VALOR_PONTO_POR_CATEGORIA)+[normalizar_categoria_evento(cat_default)]))
+                with c2: cat_e=st.selectbox("Categoria do evento",cat_opts,index=cat_opts.index(normalizar_categoria_evento(cat_default)) if normalizar_categoria_evento(cat_default) in cat_opts else 0,key=f"{key_prefix}_cat")
+                with c3: data_e=st.date_input("Data do evento",value=dt_fim,key=f"{key_prefix}_data")
+                qtd=st.number_input("Quantidade de eventos",min_value=1,step=1,value=1,key=f"{key_prefix}_qtd")
+                obs=st.text_input("Observação",key=f"{key_prefix}_obs")
+                if st.form_submit_button("➕ Lançar evento",use_container_width=True):
+                    novo=pd.DataFrame([{"MOTORISTA":mot_e,"CATEGORIA":normalizar_categoria_evento(cat_e),"DATA_EVENTO":data_e.strftime("%d/%m/%Y"),"EVENTOS":int(qtd),"OBSERVACAO":obs}])
+                    df_at=st.session_state[df_key]
+                    st.session_state[df_key]=pd.concat([df_at,novo],ignore_index=True)
+                    saver(st.session_state[df_key])
+                    st.rerun()
+        df_at=st.session_state[df_key].copy()
+        if df_at.empty:
+            st.info("Nenhum lançamento registrado.")
+        else:
+            ex=df_at.copy()
+            ex["VALOR/EVENTO"]=ex["CATEGORIA"].apply(valor_ponto_categoria)
+            ex["DESCONTO"]=pd.to_numeric(ex["EVENTOS"],errors="coerce").fillna(0)*ex["VALOR/EVENTO"]
+            ex["VALOR/EVENTO"]=ex["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+            ex["DESCONTO"]=ex["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+            st.dataframe(ex,use_container_width=True,hide_index=True)
+            opts=[f"[{i}] {r['MOTORISTA']} — {r['DATA_EVENTO']} — {r['EVENTOS']} evento(s)" for i,r in df_at.reset_index(drop=True).iterrows()]
+            sel=st.selectbox("🗑️ Registro para excluir",opts,key=f"{key_prefix}_del")
+            if st.button("🗑️ Excluir registro selecionado",key=f"{key_prefix}_del_btn"):
+                idx=int(sel.split("]")[0].replace("[",""))
+                st.session_state[df_key]=df_at.drop(index=idx).reset_index(drop=True)
+                saver(st.session_state[df_key]); st.rerun()
+
+_render_eventos_pilar(
+    tabs[9], "🚨 Excesso de Velocidade",
+    "Até 30 eventos: desconto por evento. Mais de 30 eventos no período: perda integral do prêmio.",
+    "excesso", "excesso_velocidade", salvar_excesso_velocidade, True
+)
+_render_eventos_pilar(
+    tabs[10], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
+    "Cada evento desconta 1 ponto do prêmio. Não há limite de desclassificação neste pilar.",
+    "jornada", "controle_jornada", salvar_controle_jornada, False
+)
