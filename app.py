@@ -21,6 +21,7 @@ ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv"
 ARQUIVO_FROTA_CUSTOM = os.path.join(DATA_DIR, "frota_customizada.csv")
 ARQUIVO_MOTORISTAS_CUSTOM = os.path.join(DATA_DIR, "motoristas_customizados.csv")
 ARQUIVO_INATIVOS = os.path.join(DATA_DIR, "inativos.csv")
+ARQUIVO_DATAS_MOTORISTAS = os.path.join(DATA_DIR, "datas_motoristas.csv")
 ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
 ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
 
@@ -318,7 +319,70 @@ def carregar_inativos() -> dict:
   return {"MOTORISTA": {}, "PLACA": {}}
 
 
-def alternar_inativo(tipo: str, valor: str, inativar: bool = True):
+def carregar_datas_motoristas() -> dict:
+  """Carrega datas de contratação dos motoristas."""
+  if os.path.exists(ARQUIVO_DATAS_MOTORISTAS):
+    try:
+      df = pd.read_csv(ARQUIVO_DATAS_MOTORISTAS, dtype=str, encoding="utf-8-sig")
+      if "MOTORISTA" in df.columns and "DATA_CONTRATACAO" in df.columns:
+        return {
+            DataUtils.normalizar_texto(m): str(d or "").strip()
+            for m, d in zip(df["MOTORISTA"], df["DATA_CONTRATACAO"])
+            if str(m).strip()
+        }
+    except Exception as e:
+      print(f"Erro ao carregar datas de motoristas: {e}")
+  return {}
+
+
+def salvar_data_contratacao_motorista(motorista: str, data_contratacao: str):
+  """Salva/atualiza a data de contratação de um motorista."""
+  garantir_diretorio()
+  motorista = DataUtils.normalizar_texto(motorista)
+  data_contratacao = str(data_contratacao or "").strip()
+  df = pd.DataFrame(columns=["MOTORISTA", "DATA_CONTRATACAO"])
+  if os.path.exists(ARQUIVO_DATAS_MOTORISTAS):
+    try:
+      df = pd.read_csv(ARQUIVO_DATAS_MOTORISTAS, dtype=str, encoding="utf-8-sig")
+      for c in ["MOTORISTA", "DATA_CONTRATACAO"]:
+        if c not in df.columns:
+          df[c] = ""
+      df = df[["MOTORISTA", "DATA_CONTRATACAO"]].copy()
+    except Exception:
+      df = pd.DataFrame(columns=["MOTORISTA", "DATA_CONTRATACAO"])
+
+  df["MOTORISTA"] = df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+  mask = df["MOTORISTA"] == motorista
+  if mask.any():
+    df.loc[mask, "DATA_CONTRATACAO"] = data_contratacao
+  else:
+    df = pd.concat([df, pd.DataFrame([{
+        "MOTORISTA": motorista,
+        "DATA_CONTRATACAO": data_contratacao,
+    }])], ignore_index=True)
+  df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+
+
+def atualizar_data_inativacao_motorista(motorista: str, data_inativacao: str):
+  """Atualiza a data de inativação sem alterar o status."""
+  motorista = DataUtils.normalizar_texto(motorista)
+  garantir_diretorio()
+  df = pd.DataFrame(columns=["TIPO", "VALOR", "DATA_INATIVACAO"])
+  if os.path.exists(ARQUIVO_INATIVOS):
+    try:
+      df = pd.read_csv(ARQUIVO_INATIVOS, dtype=str, encoding="utf-8-sig")
+    except Exception:
+      pass
+  for c in ["TIPO", "VALOR", "DATA_INATIVACAO"]:
+    if c not in df.columns:
+      df[c] = ""
+  mask = (df["TIPO"] == "MOTORISTA") & (df["VALOR"] == motorista)
+  if mask.any():
+    df.loc[mask, "DATA_INATIVACAO"] = str(data_inativacao or "").strip()
+    df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+
+
+def alternar_inativo(tipo: str, valor: str, inativar: bool = True, data_inativacao: str = ""):
   """Grava ou remove o motorista/placa do arquivo de inativos."""
   garantir_diretorio()
   if tipo == "MOTORISTA":
@@ -338,7 +402,7 @@ def alternar_inativo(tipo: str, valor: str, inativar: bool = True):
   mask = (df["TIPO"] == tipo) & (df["VALOR"] == valor)
   if inativar:
     if not mask.any():
-      data_atual = datetime.now().strftime("%d/%m/%Y")
+      data_atual = str(data_inativacao or "").strip() or datetime.now().strftime("%d/%m/%Y")
       novo_reg = pd.DataFrame(
           [{"TIPO": tipo, "VALOR": valor, "DATA_INATIVACAO": data_atual}]
       )
@@ -844,8 +908,12 @@ class DataLoader:
     cadastro = cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last")
 
     inativos_dict = carregar_inativos().get("MOTORISTA", {})
+    datas_contratacao = carregar_datas_motoristas()
     cadastro["STATUS"] = cadastro["MOTORISTA_CADASTRO"].apply(
         lambda x: "INATIVO" if x in inativos_dict else "ATIVO"
+    )
+    cadastro["DATA_CONTRATACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
+        lambda x: datas_contratacao.get(x, "")
     )
     cadastro["DATA_INATIVACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
         lambda x: inativos_dict.get(x, "")
@@ -2121,6 +2189,11 @@ with tabs[1]:
             key="cad_t",
         )
         base = st.text_input("Filial/Base", key="cad_b")
+        data_contratacao_novo = st.text_input(
+            "📅 Data de contratação (DD/MM/AAAA)",
+            key="cad_data_contratacao",
+            placeholder="Ex.: 15/03/2026",
+        )
         if st.button("➕ Cadastrar motorista", key="cad_mot_btn") and n and base:
             df = carregar_motoristas_customizados()
             novo = pd.DataFrame([{
@@ -2129,6 +2202,8 @@ with tabs[1]:
                 "BASE": DataUtils.normalizar_texto(base),
             }])
             salvar_motoristas_customizados(pd.concat([df, novo], ignore_index=True))
+            if str(data_contratacao_novo).strip():
+                salvar_data_contratacao_motorista(n, data_contratacao_novo)
             st.cache_resource.clear()
             st.rerun()
 
@@ -2174,13 +2249,40 @@ with tabs[1]:
         )
         mot_norm = DataUtils.normalizar_texto(mot_escolhido) if mot_escolhido else ""
         mot_esta_inativo = mot_norm in inativos_atual["MOTORISTA"]
+        datas_contratacao_atual = carregar_datas_motoristas()
+        data_contratacao_atual = datas_contratacao_atual.get(mot_norm, "")
+        data_inativacao_atual = inativos_atual["MOTORISTA"].get(mot_norm, "")
         if mot_escolhido:
             st.write(f"Status atual: {'🔴 INATIVO' if mot_esta_inativo else '🟢 ATIVO'}")
+            d1, d2 = st.columns(2)
+            with d1:
+                data_contratacao_edit = st.text_input(
+                    "📅 Data de contratação (DD/MM/AAAA)",
+                    value=data_contratacao_atual,
+                    key=f"data_contratacao_edit_{mot_norm}",
+                    placeholder="Ex.: 15/03/2026",
+                )
+            with d2:
+                data_inativacao_edit = st.text_input(
+                    "📅 Data de inativação (DD/MM/AAAA)",
+                    value=data_inativacao_atual,
+                    key=f"data_inativacao_edit_{mot_norm}",
+                    placeholder="Ex.: 20/08/2026",
+                )
+
+            if st.button("💾 Salvar Datas do Motorista", key="btn_salvar_datas_mot", use_container_width=True):
+                salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
+                if mot_esta_inativo and str(data_inativacao_edit).strip():
+                    atualizar_data_inativacao_motorista(mot_escolhido, data_inativacao_edit)
+                st.cache_resource.clear()
+                st.success("Datas do motorista salvas com sucesso.")
+                st.rerun()
+
             b1, b2 = st.columns(2)
             with b1:
                 if st.button("❌ Inativar Motorista", key="btn_inativar_mot",
                              disabled=mot_esta_inativo, use_container_width=True):
-                    alternar_inativo("MOTORISTA", mot_escolhido, True)
+                    alternar_inativo("MOTORISTA", mot_escolhido, True, data_inativacao_edit)
                     st.cache_resource.clear()
                     st.rerun()
             with b2:
@@ -2228,6 +2330,11 @@ with tabs[1]:
             "INATIVO": "🔴 INATIVO",
         })
     st.markdown("##### 👥 Motoristas cadastrados")
+    colunas_cad = [c for c in [
+        "MOTORISTA_CADASTRO", "TIPO_CADASTRO", "BASE_CADASTRO",
+        "EH_FOLGUISTA", "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
+    ] if c in cadastro_exib.columns]
+    cadastro_exib = cadastro_exib[colunas_cad]
     st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
 
     frota_exib = frota.copy()
