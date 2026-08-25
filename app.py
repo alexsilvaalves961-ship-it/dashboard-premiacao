@@ -10,6 +10,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 
+
 # ================================================================
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA (LOCAL / RAILWAY)
 # ================================================================
@@ -33,9 +34,17 @@ def carregar_ausencias() -> pd.DataFrame:
   if os.path.exists(ARQUIVO_AUSENCIAS):
     try:
       df = pd.read_csv(ARQUIVO_AUSENCIAS, dtype=str, encoding="utf-8-sig")
+      if "DATA_FIM" not in df.columns:
+        df["DATA_FIM"] = ""
       if "DIAS" in df.columns:
         df["DIAS"] = pd.to_numeric(df["DIAS"], errors="coerce").fillna(1)
-      return df
+      else:
+        df["DIAS"] = 1
+      colunas = ["MOTORISTA", "TIPO_AUSENCIA", "DATA_INICIO", "DATA_FIM", "DIAS", "OBSERVACAO"]
+      for coluna in colunas:
+        if coluna not in df.columns:
+          df[coluna] = ""
+      return df[colunas]
     except Exception as e:
       print(f"Erro ao carregar ausências: {e}")
   return pd.DataFrame(
@@ -521,6 +530,17 @@ def parse_data_filtro(val) -> Optional[pd.Timestamp]:
 def criar_data_filtro(valor) -> pd.Timestamp:
   parsed = parse_data_filtro(valor)
   return parsed if parsed is not None else pd.NaT
+
+
+def calcular_dias_ausencia(data_inicio, data_fim):
+  """Calcula dias corridos inclusivos entre a data inicial e final."""
+  dt_ini = parse_data_filtro(data_inicio)
+  dt_fim = parse_data_filtro(data_fim)
+  if dt_ini is None or dt_fim is None:
+    return 0
+  if pd.isna(dt_ini) or pd.isna(dt_fim) or pd.Timestamp(dt_fim) < pd.Timestamp(dt_ini):
+    return 0
+  return int((pd.Timestamp(dt_fim) - pd.Timestamp(dt_ini)).days + 1)
 
 
 # ================================================================
@@ -1324,6 +1344,24 @@ def aplicar_regras_gerais(
           else:
             res.at[idx, "MOTIVO_DESCLASSIFICACAO"] = novo_mot
 
+  # Motorista INATIVO não participa do pagamento do prêmio.
+  # O histórico continua no sistema, mas o valor a pagar é zerado.
+  if "STATUS_MOTORISTA" in res.columns:
+    inativos = (
+        res["STATUS_MOTORISTA"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .eq("INATIVO")
+    )
+    if inativos.any():
+      res.loc[inativos, "PREMIO"] = 0.0
+      res.loc[inativos, "STATUS_PREMIO"] = "INATIVO"
+      res.loc[inativos, "MOTIVO_DESCLASSIFICACAO"] = (
+          "Motorista inativo - prêmio desconsiderado"
+      )
+
   return res
 
 
@@ -1580,11 +1618,7 @@ def aplicar_filtros(
   f_media = f"{tot_media_geral:.2f} km/L".replace(".", ",")
   f_mots = f"{tot_mots}"
 
-  dropdown_mots_multi = gr.Dropdown(
-      choices=mots_multi if mots_multi else ["NENHUM MOTORISTA"],
-      value=mots_multi[0] if mots_multi else None,
-      interactive=True,
-  )
+  dropdown_mots_multi = mots_multi if mots_multi else ["NENHUM MOTORISTA"]
 
   return (
       f_premio,
@@ -1854,1315 +1888,273 @@ def gerar_recibos_lote(
   )
 
 
-def gerar_opcoes_exclusao_descl(df_descl: pd.DataFrame):
-  if df_descl.empty:
-    return gr.Dropdown(
-        choices=["Nenhum registro para excluir"],
-        value="Nenhum registro para excluir",
-        interactive=False,
-    )
-  opcoes = []
-  for i, r in df_descl.reset_index(drop=True).iterrows():
-    mot = r["MOTORISTA"]
-    crit_curto = (
-        str(r["CRITERIO"]).split("-")[0].strip()
-        if "-" in str(r["CRITERIO"])
-        else str(r["CRITERIO"])[:10]
-    )
-    opcoes.append(f"[{i}] {mot} - Critério {crit_curto}")
-  return gr.Dropdown(choices=opcoes, value=opcoes[0], interactive=True)
 
 
-# ================================================================
-# EXECUÇÃO PRINCIPAL E MONTAGEM DA INTERFACE
-# ================================================================
-config = AppConfig()
-config.verificar_arquivos()
+st.set_page_config(page_title="Dashboard do Prêmio de Motoristas", page_icon="🚚", layout="wide", initial_sidebar_state="expanded")
 
-loader = DataLoader(config)
-engine = RewardEngine()
+st.markdown('''
+<style>
+:root { --brand:#1E2B7A; --blue:#0099DA; --gold:#FFD700; --bg:#F6F8FC; --card:#FFFFFF; --muted:#64748B; }
+.stApp { background: var(--bg); }
+.block-container { max-width: 1500px; padding-top: 1.2rem; padding-bottom: 2rem; }
+.hero { background: linear-gradient(135deg, #ffffff 0%, #f1f5ff 100%); border:1px solid #e2e8f0; border-radius:20px; padding:22px 28px; margin-bottom:18px; box-shadow:0 4px 18px rgba(15,23,42,.05); }
+.hero h1 { margin:0; color:#0f172a; font-size:2rem; }
+.hero p { margin:.3rem 0 0; color:var(--muted); }
+.logo-bar { display:flex; align-items:center; gap:14px; }
+.logo { width:58px; height:58px; border-radius:14px; background:linear-gradient(180deg,#0099DA 0 33%,#FFD700 33% 66%,#1E2B7A 66%); display:flex; align-items:center; justify-content:center; font-size:28px; }
+.kpi { background:var(--card); border:1px solid #e2e8f0; border-radius:16px; padding:16px 18px; box-shadow:0 4px 14px rgba(15,23,42,.04); }
+.kpi .label { color:var(--muted); font-size:.82rem; margin-bottom:4px; }
+.kpi .value { color:#0f172a; font-size:1.55rem; font-weight:800; }
+.section { background:var(--card); border:1px solid #e2e8f0; border-radius:18px; padding:18px; margin:10px 0; box-shadow:0 3px 14px rgba(15,23,42,.035); }
+</style>
+''', unsafe_allow_html=True)
 
-precos = loader.carregar_precos()
-frota, mapa_frota = loader.carregar_frota()
-cadastro = loader.carregar_cadastro_motoristas()
-abastecimentos = loader.carregar_abastecimentos(mapa_frota)
-
-eventos = engine.calcular_eventos_consumo(abastecimentos)
-
-datas_validas = (
-    abastecimentos["DATA_FILTRO"].dropna()
-    if "DATA_FILTRO" in abastecimentos.columns
-    else eventos["DATA_NUM"].dropna()
-)
-if not datas_validas.empty:
-  min_date_default = datas_validas.min().strftime("%d/%m/%Y")
-  max_date_default = datas_validas.max().strftime("%d/%m/%Y")
-else:
-  min_date_default = "01/01/2026"
-  max_date_default = "31/12/2026"
-
-df_ausencias_global = carregar_ausencias()
-df_desclassificacoes_global = carregar_desclassificacoes()
-mapa_cat_custom_global = carregar_categorias_customizadas()
-
-(
-    f_premio_init,
-    f_gasto_init,
-    f_km_init,
-    f_litros_init,
-    f_media_init,
-    f_mots_init,
-    res_view_init,
-    rh_view_init,
-    det_view_init,
-    df_multi_init,
-    mots_multi_drop_init,
-    res_f_init,
-) = aplicar_filtros(
-    min_date_default,
-    max_date_default,
-    "TODOS",
-    "",
-    "TODAS",
-    "TODAS",
-    df_ausencias_global,
-    df_desclassificacoes_global,
-    mapa_cat_custom_global,
-)
-
-mots_lista = ["TODOS"] + sorted(list(res_f_init["MOTORISTA"].dropna().unique()))
-cats_lista = ["TODAS"] + sorted(list(res_f_init["CATEGORIA"].dropna().unique()))
-cats_precos_opcoes = sorted(list(precos["TIPO"].unique()))
-filiais_lista = ["TODAS"] + sorted([
-    str(b) for b in res_f_init["BASE"].dropna().unique() if str(b).strip() != ""
-])
-mots_opcao = sorted(list(res_f_init["MOTORISTA"].dropna().unique()))
-
-with gr.Blocks(
-    theme=gr.themes.Soft(), title="Dashboard do Prêmio de Motoristas"
-) as app:
-
-  state_resumo = gr.State(value=res_f_init)
-  state_ausencias = gr.State(value=df_ausencias_global)
-  state_desclassificacoes = gr.State(value=df_desclassificacoes_global)
-  state_cat_custom = gr.State(value=mapa_cat_custom_global)
-
-  gr.HTML("""
-        <div style="background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 16px; padding: 20px 28px; display: flex; align-items: center; gap: 24px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03); margin-bottom: 20px;">
-            <div style="display: flex; flex-direction: column; align-items: center; width: 95px; flex-shrink: 0;">
-                <div style="width: 85px; height: 42px; position: relative; border-radius: 2px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid #CBD5E1;">
-                    <div style="height: 33.3%; background-color: #0099DA;"></div>
-                    <div style="height: 33.3%; background-color: #FFD700;"></div>
-                    <div style="height: 33.3%; background-color: #1E2B7A;"></div>
-                    <svg viewBox="0 0 24 24" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 24px; height: 24px;">
-                        <path fill="#0099DA" stroke="#FFFFFF" stroke-width="1.5" d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
-                        <path fill="#FFFFFF" d="M10 8.5a2.5 2.5 0 0 0 2.5 2.5 0.7 0.7 0 0 0-1.4 0z"/>
-                    </svg>
-                </div>
-                <span style="font-family: 'Arial Black', sans-serif; font-weight: 900; color: #1E2B7A; font-size: 13px; margin-top: 3px;">Ciapetro</span>
-                <span style="font-family: sans-serif; font-size: 5px; color: #475569; text-align: center; text-transform: uppercase;">Distribuidora de Combustíveis</span>
-            </div>
-
-            <div style="display: flex; flex-direction: column; justify-content: center;">
-                <h1 style="margin: 0; color: #0F172A; font-size: 26px; font-weight: 800;">
-                    Dashboard do Prêmio de Motoristas
-                </h1>
-                <p style="margin: 4px 0 0 0; color: #64748B; font-size: 14px;">
-                    Visão gerencial de consumo, desempenho e prêmio
-                </p>
-            </div>
-        </div>
-        """)
-
-  with gr.Row():
-    f_dt_ini = gr.Textbox(
-        label="📅 Data Início",
-        value=min_date_default,
-        placeholder="DD/MM/AAAA ou AAAA-MM-DD",
-    )
-    f_dt_fim = gr.Textbox(
-        label="📅 Data Fim",
-        value=max_date_default,
-        placeholder="DD/MM/AAAA ou AAAA-MM-DD",
-    )
-    f_mot = gr.Dropdown(
-        choices=mots_lista,
-        value="TODOS",
-        label="👤 Filtrar Motorista",
-        filterable=True,
-    )
-
-  with gr.Row():
-    f_plc = gr.Textbox(
-        label="🔍 Filtrar Placa", placeholder="Ex: ABC1234 ou ABC1D23"
-    )
-    f_cat = gr.Dropdown(
-        choices=cats_lista, value="TODAS", label="🏷️ Categoria de Veículo"
-    )
-    f_fil = gr.Dropdown(
-        choices=filiais_lista,
-        value="TODAS",
-        label="🏢 Filtrar Filial / Base",
-        filterable=True,
-    )
-
-  with gr.Row():
-    btn_aplicar = gr.Button("⚡ Aplicar Filtros", variant="primary")
-    btn_limpar = gr.Button("🔄 Limpar Filtros", variant="secondary")
-
-  gr.Markdown("---")
-
-  with gr.Row():
-    kpi_p = gr.Textbox(
-        label="💰 Total em Prêmios", value=f_premio_init, interactive=False
-    )
-    kpi_gasto_comb = gr.Textbox(
-        label="💳 Total Gasto Combustível",
-        value=f_gasto_init,
-        interactive=False,
-    )
-    kpi_k = gr.Textbox(
-        label="RODADO TOTAL (KM)", value=f_km_init, interactive=False
-    )
-    kpi_l = gr.Textbox(
-        label="⛽ COMBUSTÍVEL TOTAL", value=f_litros_init, interactive=False
-    )
-    kpi_avg = gr.Textbox(
-        label="🎯 MÉDIA GERAL (KM/L)", value=f_media_init, interactive=False
-    )
-    kpi_m = gr.Textbox(
-        label="👥 MOTORISTAS NA LISTA", value=f_mots_init, interactive=False
-    )
-
-  gr.Markdown("---")
-
-  with gr.Tabs():
-    with gr.Tab("📊 Resumo de Premiações por Motorista"):
-      grid_resumo = gr.Dataframe(value=res_view_init, interactive=False)
-
-    with gr.Tab("⚙️ Gestão de Cadastros"):
-      gr.Markdown(
-          "### 🛠️ **Cadastro de Motoristas e Frota (Placas / Filiais / Tipos)**"
-      )
-      gr.Markdown(
-          "Adicione novos motoristas ou veículos diretamente no sistema. Os"
-          " dados informados aqui são salvos e integrados automaticamente"
-          " aos cálculos e filtros."
-      )
-
-      with gr.Row():
-        with gr.Column():
-          gr.Markdown("#### 👤 **Cadastrar Novo Motorista**")
-          in_cad_mot_nome = gr.Textbox(
-              label="Nome do Motorista", placeholder="Ex: JOAO SILVA"
-          )
-          in_cad_mot_tipo = gr.Dropdown(
-              choices=cats_precos_opcoes + ["FOLGUISTA"],
-              value=cats_precos_opcoes[0] if cats_precos_opcoes else "TRUCK",
-              label="Tipo / Categoria Padrão",
-          )
-          in_cad_mot_base = gr.Textbox(
-              label="Filial / Base", placeholder="Ex: CIANORTE ou UBERABA"
-          )
-          btn_cad_mot = gr.Button(
-              "➕ Salvar Novo Motorista", variant="primary"
-          )
-          out_msg_mot = gr.Markdown("")
-
-        with gr.Column():
-          gr.Markdown("#### 🚛 **Cadastrar Nova Placa / Frota**")
-          in_cad_placa = gr.Textbox(
-              label="Placa / Cavalo", placeholder="Ex: XYZ9999"
-          )
-          in_cad_placa_tipo = gr.Dropdown(
-              choices=cats_precos_opcoes,
-              value=cats_precos_opcoes[0] if cats_precos_opcoes else "TRUCK",
-              label="Tipo de Veículo",
-          )
-          btn_cad_frota = gr.Button("➕ Salvar Nova Placa", variant="primary")
-          out_msg_frota = gr.Markdown("")
-
-      gr.Markdown("---")
-      gr.Markdown("### 📋 **Relação Atual de Cadastros no Sistema**")
-      with gr.Row():
-        grid_cad_motoristas = gr.Dataframe(
-            value=cadastro[[
-                "MOTORISTA_CADASTRO",
-                "TIPO_CADASTRO",
-                "BASE_CADASTRO",
-                "STATUS",
-                "DATA_INATIVACAO",
-            ]].rename(columns={
-                "MOTORISTA_CADASTRO": "MOTORISTA",
-                "TIPO_CADASTRO": "TIPO",
-                "BASE_CADASTRO": "BASE",
-                "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-            }),
-            interactive=False,
-            label="Motoristas Cadastrados",
-        )
-        grid_cad_frota = gr.Dataframe(
-            value=frota[[
-                "PLACA_PADRONIZADA",
-                "TIPO",
-                "STATUS",
-                "DATA_INATIVACAO",
-            ]].rename(columns={
-                "PLACA_PADRONIZADA": "PLACA",
-                "TIPO": "TIPO VEICULO",
-                "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-            }),
-            interactive=False,
-            label="Frota Cadastrada",
-        )
-
-      gr.Markdown("---")
-      gr.Markdown("### ❌ **Inativar / Reativar Cadastros**")
-      gr.Markdown(
-          "Se um motorista for demitido ou um veículo vendido, utilize as opções"
-          " abaixo. Os dados históricos permanecerão nos cálculos, mas eles"
-          " constarão como INATIVOS no sistema, inclusive com sua data de saída."
-      )
-
-      with gr.Row():
-        with gr.Column():
-          opcoes_mots_cad = sorted(
-              list(cadastro["MOTORISTA_CADASTRO"].unique())
-          )
-          inativar_mot_dropdown = gr.Dropdown(
-              choices=opcoes_mots_cad,
-              label="👤 Selecionar Motorista para Inativar/Reativar",
-          )
-          with gr.Row():
-            btn_inativar_mot = gr.Button(
-                "❌ Inativar Motorista", variant="stop"
-            )
-            btn_reativar_mot = gr.Button(
-                "✅ Reativar Motorista", variant="secondary"
-            )
-          out_msg_inativar_mot = gr.Markdown("")
-
-        with gr.Column():
-          opcoes_placas_cad = sorted(
-              list(frota["PLACA_PADRONIZADA"].unique())
-          )
-          inativar_placa_dropdown = gr.Dropdown(
-              choices=opcoes_placas_cad,
-              label="🚛 Selecionar Placa para Inativar/Reativar",
-          )
-          with gr.Row():
-            btn_inativar_placa = gr.Button(
-                "❌ Inativar Placa", variant="stop"
-            )
-            btn_reativar_placa = gr.Button(
-                "✅ Reativar Placa", variant="secondary"
-            )
-          out_msg_inativar_placa = gr.Markdown("")
-
-    with gr.Tab("🚛 Múltiplas Placas (Média Separada por Placa)"):
-      gr.Markdown(
-          "### 🚛 **Cálculo Separado por Placa (Motoristas que abasteceram em"
-          " > 1 placa)**"
-      )
-      gr.Markdown(
-          "Motoristas que abasteceram em múltiplos veículos têm suas médias e"
-          " consumos discriminados individualmente por placa abaixo."
-      )
-      grid_multi_placas = gr.Dataframe(value=df_multi_init, interactive=False)
-
-    with gr.Tab("🏷️ Definir Categoria de Pagamento (Multi-Placas)"):
-      gr.Markdown("### 🏷️ **Marcação da Categoria para Pagamento do Prêmio**")
-      gr.Markdown(
-          "Para motoristas que abasteceram em mais de uma placa de categorias"
-          " diferentes, escolha abaixo qual categoria será considerada para a"
-          " régua de pagamento do prêmio."
-      )
-
-      # O seletor de placa é preenchido dinamicamente de acordo com o motorista.
-      def placas_iniciais_do_motorista(nome_motorista):
-        mot_norm = DataUtils.normalizar_texto(nome_motorista)
-        if not mot_norm or mot_norm in ("NENHUM MOTORISTA", "TODOS"):
-          return []
-        placas = (
-            eventos.loc[
-                eventos["CONDUTOR_NORMALIZADO"].eq(mot_norm),
-                "PLACA_PADRONIZADA",
-            ]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-        return sorted([p for p in placas.unique().tolist() if p])
-
-      placas_multi_iniciais = placas_iniciais_do_motorista(
-          mots_multi_drop_init.value
-      )
-
-      with gr.Row():
-        sel_mot_multi = gr.Dropdown(
-            choices=mots_multi_drop_init.choices,
-            value=mots_multi_drop_init.value,
-            label="👤 Selecionar Motorista com Múltiplas Placas",
-            filterable=True,
-        )
-        sel_placa_multi = gr.Dropdown(
-            choices=placas_multi_iniciais,
-            value=placas_multi_iniciais[0] if placas_multi_iniciais else None,
-            label="🚛 Selecionar Placa Específica",
-            filterable=True,
-        )
-        sel_cat_marca = gr.Dropdown(
-            choices=cats_precos_opcoes,
-            value=cats_precos_opcoes[0] if cats_precos_opcoes else None,
-            label="🏷️ Categoria a ser Considerada para Pagamento",
-        )
-        btn_salvar_cat_marca = gr.Button(
-            "💾 Salvar Categoria Escolhida", variant="primary"
-        )
-
-      out_msg_cat = gr.Markdown("")
-
-      gr.Markdown("#### 📋 **Mapeamentos Manuais de Categoria Ativos**")
-
-      def gerar_df_custom(mapa):
-        colunas = ["MOTORISTA", "PLACA", "CATEGORIA DEFINIDA"]
-        if not mapa:
-          return pd.DataFrame(columns=colunas)
-        registros_custom = []
-        for chave, categoria in mapa.items():
-          chave = str(chave).strip().upper()
-          if "|||" in chave:
-            mot, placa = chave.split("|||", 1)
-          else:
-            mot, placa = chave, ""
-          registros_custom.append([mot, placa, categoria])
-        return pd.DataFrame(registros_custom, columns=colunas)
-
-      grid_custom_cats = gr.Dataframe(
-          value=gerar_df_custom(mapa_cat_custom_global), interactive=False
-      )
-
-    with gr.Tab("👔 Relatório RH - Lançamento de Pagamento"):
-      gr.Markdown("### 👔 **Relatório RH - Pagamento de Prêmios**")
-      gr.Markdown(
-          "Relação simplificada de motoristas, filiais e valores devidos para"
-          " lançamento na folha de pagamento pelo setor de RH. (*Motoristas"
-          " Inativos não aparecem aqui*)"
-      )
-      grid_rh = gr.Dataframe(value=rh_view_init, interactive=False)
-
-    with gr.Tab("📋 Detalhamento dos Abastecimentos"):
-      grid_eventos = gr.Dataframe(value=det_view_init, interactive=False)
-
-    with gr.Tab("📄 Recibo de Premiação"):
-      gr.Markdown("### 🖨️ **Gerador de Recibo de Premiação para Assinatura**")
-
-      mots_ativos_inic = (
-          res_f_init[res_f_init["STATUS_MOTORISTA"] == "ATIVO"]["MOTORISTA"]
-          .dropna()
-          .unique()
-          if "STATUS_MOTORISTA" in res_f_init.columns
-          else res_f_init["MOTORISTA"].dropna().unique()
-      )
-      opcoes_recibo_inic = [
-          "SELECIONE...",
-          "TODOS OS MOTORISTAS (TODAS AS FILIAIS)",
-      ] + sorted(list(mots_ativos_inic))
-
-      with gr.Row():
-        rec_fil = gr.Dropdown(
-            choices=filiais_lista,
-            value="TODAS",
-            label="🏢 Filtrar Filial / Base",
-            filterable=True,
-        )
-        rec_mot = gr.Dropdown(
-            choices=opcoes_recibo_inic,
-            value="TODOS OS MOTORISTAS (TODAS AS FILIAIS)",
-            label="👤 Selecionar Motorista",
-            filterable=True,
-        )
-        rec_ini = gr.Textbox(label="📅 Período Início", value=min_date_default)
-        rec_fim = gr.Textbox(label="📅 Período Fim", value=max_date_default)
-
-      with gr.Row():
-        rec_fator = gr.Textbox(label="⚖️ Fator Carga", value="50%")
-        btn_recibo = gr.Button(
-            "📄 Gerar / Atualizar Recibo(s)", variant="primary"
-        )
-
-      recibo_output = gr.HTML(
-          value=(
-              "<div style='text-align: center; padding: 40px; color:"
-              " #64748B;'>👉 Selecione um motorista ou uma filial acima para"
-              " gerar os recibos.</div>"
-          )
-      )
-
-    with gr.Tab("🏥 Lançamento de Atestados e Férias"):
-      gr.Markdown(
-          "### 🏥 **Lançamento de Ausências (Desconto de Atestados /"
-          " Férias)**"
-      )
-      gr.Markdown(
-          "Os dias lançados aqui serão automaticamente descontados da"
-          " quantidade de **dias efetivos** e do **valor final do prêmio** no"
-          " dashboard e nos recibos."
-      )
-
-      with gr.Row():
-        aus_mot = gr.Dropdown(
-            choices=mots_opcao, label="👤 Motorista", filterable=True
-        )
-        aus_tipo = gr.Radio(
-            choices=["Atestado Médico", "Férias", "Outro Afastamento"],
-            value="Atestado Médico",
-            label="📌 Tipo de Ausência",
-        )
-        aus_data = gr.Textbox(
-            label="📅 Data de Início",
-            value=min_date_default,
-            placeholder="DD/MM/AAAA",
-        )
-        aus_dias = gr.Number(label="🔢 Dias Ausente", value=1, precision=0)
-
-      aus_obs = gr.Textbox(
-          label="📝 Observação / Motivo",
-          placeholder="Ex: CID 10, Licença médica, Férias regulamentares...",
-      )
-
-      with gr.Row():
-        btn_add_ausencia = gr.Button("➕ Lançar Ausência", variant="primary")
-        btn_limpar_ausencias = gr.Button(
-            "🗑️ Limpar Todos os Lançamentos", variant="stop"
-        )
-
-      gr.Markdown("#### 📋 **Histórico de Ausências Lançadas**")
-      grid_ausencias = gr.Dataframe(
-          value=df_ausencias_global, interactive=False
-      )
-
-    with gr.Tab("🚫 Gestão de Desclassificações (Pilar 1)"):
-      gr.Markdown(
-          "### 🚫 **1º Pilar - Controles Administrativos e Operacionais**"
-      )
-      gr.Markdown(
-          "Registrar infrações operacionais. Os critérios de **5 a 15**"
-          " desclassificam o motorista diretamente. Já os critérios de **1 a"
-          " 4** acumulam pontos (o acúmulo de **mais de 129 pontos** nestes"
-          " critérios também gera a desclassificação automática com prêmio"
-          " zerado em R$ 0,00)."
-      )
-
-      with gr.Row():
-        descl_mot = gr.Dropdown(
-            choices=mots_opcao, label="👤 Motorista", filterable=True
-        )
-        descl_crit = gr.Dropdown(
-            choices=CRITERIOS_PILAR_1,
-            value=CRITERIOS_PILAR_1[0],
-            label="📌 Critério / Infração",
-        )
-        descl_pontos = gr.Number(
-            label="🔢 Quantidade de Pontos / Eventos", value=1, precision=0
-        )
-
-      descl_obs = gr.Textbox(
-          label="📝 Observação / Detalhes da Infração",
-          placeholder=(
-              "Ex: Ocorrência de freada brusca gravada pela telemetria, não uso"
-              " do cinto..."
-          ),
-      )
-
-      with gr.Row():
-        btn_add_desclassificacao = gr.Button(
-            "🚫 Registrar Infração / Desclassificação", variant="primary"
-        )
-
-      gr.Markdown("---")
-      gr.Markdown(
-          "#### 📋 **Histórico de Desclassificações e Infrações Registradas**"
-      )
-      grid_desclassificacoes = gr.Dataframe(
-          value=df_desclassificacoes_global, interactive=False
-      )
-
-      opcoes_excl_inic = gerar_opcoes_exclusao_descl(
-          df_desclassificacoes_global
-      )
-
-      with gr.Row():
-        descl_excluir_sel = gr.Dropdown(
-            choices=opcoes_excl_inic.choices,
-            value=opcoes_excl_inic.value,
-            label="🗑️ Selecionar Registro para Excluir",
-            filterable=True,
-            interactive=opcoes_excl_inic.interactive,
-        )
-        btn_excluir_item_descl = gr.Button(
-            "🗑️ Excluir Registro Selecionado", variant="stop"
-        )
-        btn_limpar_desclassificacoes = gr.Button(
-            "⚠️ Limpar TODOS os Lançamentos", variant="secondary"
-        )
-
-  # ================================================================
-  # LÓGICA E EVENTOS DO GRADIO
-  # ================================================================
-
-  def gerenciar_status_motorista(nome, inativar=True):
-    global cadastro
-    if not nome:
-      grid_cad_m = cadastro[[
-          "MOTORISTA_CADASTRO",
-          "TIPO_CADASTRO",
-          "BASE_CADASTRO",
-          "STATUS",
-          "DATA_INATIVACAO",
-      ]].rename(columns={
-          "MOTORISTA_CADASTRO": "MOTORISTA",
-          "TIPO_CADASTRO": "TIPO",
-          "BASE_CADASTRO": "BASE",
-          "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-      })
-      return "⚠️ Selecione um motorista.", grid_cad_m
-
-    alternar_inativo("MOTORISTA", nome, inativar)
-    cadastro = loader.carregar_cadastro_motoristas()
-    grid_cad_m = cadastro[[
-        "MOTORISTA_CADASTRO",
-        "TIPO_CADASTRO",
-        "BASE_CADASTRO",
-        "STATUS",
-        "DATA_INATIVACAO",
-    ]].rename(columns={
-        "MOTORISTA_CADASTRO": "MOTORISTA",
-        "TIPO_CADASTRO": "TIPO",
-        "BASE_CADASTRO": "BASE",
-        "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-    })
-    acao = "inativado" if inativar else "reativado"
-    return f"✅ Motorista **{nome}** {acao} com sucesso!", grid_cad_m
-
-  def gerenciar_status_placa(placa, inativar=True):
-    global frota, mapa_frota
-    if not placa:
-      grid_cad_f = frota[[
-          "PLACA_PADRONIZADA",
-          "TIPO",
-          "STATUS",
-          "DATA_INATIVACAO",
-      ]].rename(columns={
-          "PLACA_PADRONIZADA": "PLACA",
-          "TIPO": "TIPO VEICULO",
-          "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-      })
-      return "⚠️ Selecione uma placa.", grid_cad_f
-
-    alternar_inativo("PLACA", placa, inativar)
+@st.cache_resource(show_spinner=False)
+def carregar_base():
+    config = AppConfig(); config.verificar_arquivos()
+    loader = DataLoader(config); engine = RewardEngine()
+    precos = loader.carregar_precos()
     frota, mapa_frota = loader.carregar_frota()
-    grid_cad_f = frota[[
-        "PLACA_PADRONIZADA",
-        "TIPO",
-        "STATUS",
-        "DATA_INATIVACAO",
-    ]].rename(columns={
-        "PLACA_PADRONIZADA": "PLACA",
-        "TIPO": "TIPO VEICULO",
-        "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-    })
-    acao = "inativada" if inativar else "reativada"
-    return f"✅ Placa **{placa}** {acao} com sucesso!", grid_cad_f
-
-  def adicionar_motorista_cad(nome, tipo, base):
-    global cadastro
-    if not nome or not nome.strip():
-      grid_cad_m = cadastro[[
-          "MOTORISTA_CADASTRO",
-          "TIPO_CADASTRO",
-          "BASE_CADASTRO",
-          "STATUS",
-          "DATA_INATIVACAO",
-      ]].rename(columns={
-          "MOTORISTA_CADASTRO": "MOTORISTA",
-          "TIPO_CADASTRO": "TIPO",
-          "BASE_CADASTRO": "BASE",
-          "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-      })
-      return "⚠️ Digite o nome do motorista.", grid_cad_m
-
-    nome_norm = DataUtils.normalizar_texto(nome)
-    tipo_norm = DataUtils.normalizar_texto(tipo)
-    base_norm = DataUtils.normalizar_texto(base)
-
-    df_custom = carregar_motoristas_customizados()
-    novo_reg = pd.DataFrame(
-        [{"MOTORISTAS": nome_norm, "TIPO": tipo_norm, "BASE": base_norm}]
-    )
-    df_custom = pd.concat([df_custom, novo_reg], ignore_index=True)
-    salvar_motoristas_customizados(df_custom)
-
     cadastro = loader.carregar_cadastro_motoristas()
-    grid_cad_m = cadastro[[
-        "MOTORISTA_CADASTRO",
-        "TIPO_CADASTRO",
-        "BASE_CADASTRO",
-        "STATUS",
-        "DATA_INATIVACAO",
-    ]].rename(columns={
-        "MOTORISTA_CADASTRO": "MOTORISTA",
-        "TIPO_CADASTRO": "TIPO",
-        "BASE_CADASTRO": "BASE",
-        "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-    })
-    return (
-        f"✅ Motorista **{nome_norm}** cadastrado com sucesso!",
-        grid_cad_m,
+    abastecimentos = loader.carregar_abastecimentos(mapa_frota)
+    eventos = engine.calcular_eventos_consumo(abastecimentos)
+    return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
+
+config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base()
+if "ausencias" not in st.session_state: st.session_state.ausencias = carregar_ausencias()
+if "desclassificacoes" not in st.session_state: st.session_state.desclassificacoes = carregar_desclassificacoes()
+if "mapa_cat_custom" not in st.session_state: st.session_state.mapa_cat_custom = carregar_categorias_customizadas()
+
+datas_validas = abastecimentos["DATA_FILTRO"].dropna() if "DATA_FILTRO" in abastecimentos.columns else eventos["DATA_NUM"].dropna()
+min_dt = datas_validas.min().date() if not datas_validas.empty else date(2026,1,1)
+max_dt = datas_validas.max().date() if not datas_validas.empty else date(2026,12,31)
+
+def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
+    di = dt_ini.strftime('%d/%m/%Y') if isinstance(dt_ini, date) else str(dt_ini)
+    df = dt_fim.strftime('%d/%m/%Y') if isinstance(dt_fim, date) else str(dt_fim)
+    return aplicar_filtros(di, df, motorista, placa, categoria, filial, st.session_state.ausencias, st.session_state.desclassificacoes, st.session_state.mapa_cat_custom)
+
+def ausencia_label(i, row):
+    return f"[{i}] {row.get('MOTORISTA','')} — {row.get('TIPO_AUSENCIA','')} — {row.get('DATA_INICIO','')} até {row.get('DATA_FIM','')} ({row.get('DIAS',0)} dias)"
+
+def descl_label(i, row):
+    return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()}"
+
+# Valores iniciais para os filtros
+initial = aplicar_filtros_st(min_dt, max_dt, "TODOS", "", "TODAS", "TODAS")
+res_initial = initial[-1]
+mots_lista = ["TODOS"] + sorted(res_initial["MOTORISTA"].dropna().unique().tolist())
+cats_lista = ["TODAS"] + sorted(res_initial["CATEGORIA"].dropna().unique().tolist())
+filiais_lista = ["TODAS"] + sorted([str(x) for x in cadastro["BASE_CADASTRO"].dropna().unique() if str(x).strip()])
+
+st.markdown('''<div class="hero"><div class="logo-bar"><div class="logo">🚚</div><div><h1>Dashboard do Prêmio de Motoristas</h1><p>Visão gerencial de consumo, desempenho e premiação</p></div></div></div>''', unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown("## 🔎 Filtros")
+    dt_ini = st.date_input("Data início", value=min_dt, format="DD/MM/YYYY")
+    dt_fim = st.date_input("Data fim", value=max_dt, format="DD/MM/YYYY")
+    mot = st.selectbox("Motorista", mots_lista)
+    placa = st.text_input("Placa")
+    cat = st.selectbox("Categoria", cats_lista)
+    filial = st.selectbox("Filial / Base", filiais_lista)
+    if st.button("🔄 Limpar filtros", use_container_width=True): st.rerun()
+
+current = aplicar_filtros_st(dt_ini, dt_fim, mot, placa, cat, filial)
+(f_premio, f_gasto, f_km, f_litros, f_media, f_mots, res_view, rh_view, det_view, df_multi, mots_multi, res_f) = current
+
+kpis=st.columns(6)
+for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
+    c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
+
+tabs=st.tabs(["📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações"])
+with tabs[0]:
+    st.subheader("Resumo de Premiações")
+    st.dataframe(res_view,use_container_width=True,hide_index=True)
+with tabs[1]:
+    st.subheader("Gestão de Cadastros")
+
+    a, b = st.columns(2)
+    with a:
+        st.markdown("#### 👤 Novo motorista")
+        n = st.text_input("Nome", key="cad_n")
+        t = st.selectbox(
+            "Tipo",
+            sorted(precos["TIPO"].unique()) + ["FOLGUISTA"],
+            key="cad_t",
+        )
+        base = st.text_input("Filial/Base", key="cad_b")
+        if st.button("➕ Cadastrar motorista", key="cad_mot_btn") and n and base:
+            df = carregar_motoristas_customizados()
+            novo = pd.DataFrame([{
+                "MOTORISTAS": DataUtils.normalizar_texto(n),
+                "TIPO": DataUtils.normalizar_texto(t),
+                "BASE": DataUtils.normalizar_texto(base),
+            }])
+            salvar_motoristas_customizados(pd.concat([df, novo], ignore_index=True))
+            st.cache_resource.clear()
+            st.rerun()
+
+    with b:
+        st.markdown("#### 🚛 Nova placa")
+        p = st.text_input("Placa", key="cad_p")
+        tp = st.selectbox(
+            "Tipo do veículo",
+            sorted(precos["TIPO"].unique()),
+            key="cad_tp",
+        )
+        if st.button("➕ Cadastrar placa", key="cad_placa_btn") and p:
+            df = carregar_frota_customizada()
+            novo = pd.DataFrame([{
+                "CAVALO": DataUtils.padronizar_placa(p),
+                "TIPO": DataUtils.normalizar_texto(tp),
+            }])
+            salvar_frota_customizada(pd.concat([df, novo], ignore_index=True))
+            st.cache_resource.clear()
+            st.rerun()
+
+    st.markdown("#### 🔄 Inativar / Reativar Cadastros")
+    st.caption(
+        "Motoristas inativados permanecem no histórico, mas o prêmio é desconsiderado. "
+        "Placas inativadas permanecem no histórico e ficam marcadas como inativas."
     )
 
-  def adicionar_placa_frota(placa, tipo):
-    global frota, mapa_frota
-    if not placa or not placa.strip():
-      grid_cad_f = frota[[
-          "PLACA_PADRONIZADA",
-          "TIPO",
-          "STATUS",
-          "DATA_INATIVACAO",
-      ]].rename(columns={
-          "PLACA_PADRONIZADA": "PLACA",
-          "TIPO": "TIPO VEICULO",
-          "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-      })
-      return "⚠️ Digite a placa do veículo.", grid_cad_f
+    inativos_atual = carregar_inativos()
+    col_mot, col_placa = st.columns(2)
 
-    placa_norm = DataUtils.padronizar_placa(placa)
-    tipo_norm = DataUtils.normalizar_texto(tipo)
+    with col_mot:
+        st.markdown("##### 👤 Motorista")
+        mot_cad_lista = sorted(
+            cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist()
+        )
+        mot_escolhido = (
+            st.selectbox(
+                "Selecionar motorista para inativar/reativar",
+                mot_cad_lista,
+                key="inativar_mot_sel",
+            )
+            if mot_cad_lista else None
+        )
+        mot_norm = DataUtils.normalizar_texto(mot_escolhido) if mot_escolhido else ""
+        mot_esta_inativo = mot_norm in inativos_atual["MOTORISTA"]
+        if mot_escolhido:
+            st.write(f"Status atual: {'🔴 INATIVO' if mot_esta_inativo else '🟢 ATIVO'}")
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("❌ Inativar Motorista", key="btn_inativar_mot",
+                             disabled=mot_esta_inativo, use_container_width=True):
+                    alternar_inativo("MOTORISTA", mot_escolhido, True)
+                    st.cache_resource.clear()
+                    st.rerun()
+            with b2:
+                if st.button("✅ Reativar Motorista", key="btn_reativar_mot",
+                             disabled=not mot_esta_inativo, use_container_width=True):
+                    alternar_inativo("MOTORISTA", mot_escolhido, False)
+                    st.cache_resource.clear()
+                    st.rerun()
 
-    df_custom = carregar_frota_customizada()
-    novo_reg = pd.DataFrame([{"CAVALO": placa_norm, "TIPO": tipo_norm}])
-    df_custom = pd.concat([df_custom, novo_reg], ignore_index=True)
-    salvar_frota_customizada(df_custom)
+    with col_placa:
+        st.markdown("##### 🚛 Placa")
+        placas_cad_lista = sorted(
+            frota["PLACA_PADRONIZADA"].dropna().astype(str).unique().tolist()
+        )
+        placa_escolhida = (
+            st.selectbox(
+                "Selecionar placa para inativar/reativar",
+                placas_cad_lista,
+                key="inativar_placa_sel",
+            )
+            if placas_cad_lista else None
+        )
+        placa_norm = DataUtils.padronizar_placa(placa_escolhida) if placa_escolhida else ""
+        placa_esta_inativa = placa_norm in inativos_atual["PLACA"]
+        if placa_escolhida:
+            st.write(f"Status atual: {'🔴 INATIVA' if placa_esta_inativa else '🟢 ATIVA'}")
+            b3, b4 = st.columns(2)
+            with b3:
+                if st.button("❌ Inativar Placa", key="btn_inativar_placa",
+                             disabled=placa_esta_inativa, use_container_width=True):
+                    alternar_inativo("PLACA", placa_escolhida, True)
+                    st.cache_resource.clear()
+                    st.rerun()
+            with b4:
+                if st.button("✅ Reativar Placa", key="btn_reativar_placa",
+                             disabled=not placa_esta_inativa, use_container_width=True):
+                    alternar_inativo("PLACA", placa_escolhida, False)
+                    st.cache_resource.clear()
+                    st.rerun()
 
-    frota, mapa_frota = loader.carregar_frota()
-    grid_cad_f = frota[[
-        "PLACA_PADRONIZADA",
-        "TIPO",
-        "STATUS",
-        "DATA_INATIVACAO",
-    ]].rename(columns={
-        "PLACA_PADRONIZADA": "PLACA",
-        "TIPO": "TIPO VEICULO",
-        "DATA_INATIVACAO": "DATA INATIVAÇÃO",
-    })
-    return f"✅ Placa **{placa_norm}** cadastrada com sucesso!", grid_cad_f
+    cadastro_exib = cadastro.copy()
+    if "STATUS" in cadastro_exib.columns:
+        cadastro_exib["STATUS"] = cadastro_exib["STATUS"].replace({
+            "ATIVO": "🟢 ATIVO",
+            "INATIVO": "🔴 INATIVO",
+        })
+    st.markdown("##### 👥 Motoristas cadastrados")
+    st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
 
-  def salvar_categoria_customizada_handler(
-      mot_chave,
-      placa_escolhida,
-      cat_escolhida,
-      map_cat_st,
-      dt_ini,
-      dt_fim,
-      mot,
-      plc,
-      cat,
-      fil,
-      aus_df,
-      descl_df,
-  ):
-    mot_norm = DataUtils.normalizar_texto(mot_chave)
-    placa_norm = DataUtils.padronizar_placa(placa_escolhida)
+    frota_exib = frota.copy()
+    if "STATUS" in frota_exib.columns:
+        frota_exib["STATUS"] = frota_exib["STATUS"].replace({
+            "ATIVO": "🟢 ATIVA",
+            "INATIVO": "🔴 INATIVA",
+        })
+    st.markdown("##### 🚚 Placas cadastradas")
+    st.dataframe(frota_exib, use_container_width=True, hide_index=True)
 
-    if not mot_norm or mot_norm in ["NENHUM MOTORISTA", ""]:
-      msg = "⚠️ Selecione um motorista válido."
-      res_empty = aplicar_filtros(
-          dt_ini, dt_fim, mot, plc, cat, fil, aus_df, descl_df, map_cat_st
-      )
-      return (msg, map_cat_st, gerar_df_custom(map_cat_st)) + res_empty
+with tabs[2]:
+    st.subheader("Média separada por placa")
+    st.dataframe(df_multi,use_container_width=True,hide_index=True)
+with tabs[3]:
+    st.subheader("Categoria considerada para pagamento")
+    mot_opts=sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else []
+    sm=st.selectbox("Motorista",mot_opts) if mot_opts else ""
+    plate_opts=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==sm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm else []
+    sp=st.selectbox("Placa",plate_opts) if plate_opts else ""
+    sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()))
+    if st.button("💾 Salvar categoria",key="savecat") and sm and sp:
+        st.session_state.mapa_cat_custom[normalizar_chave_categoria_customizada(sm,sp)]=DataUtils.normalizar_texto(sc); salvar_categorias_customizadas(st.session_state.mapa_cat_custom); st.rerun()
+    st.dataframe(pd.DataFrame(list(st.session_state.mapa_cat_custom.items()),columns=["MOTORISTA|||PLACA","CATEGORIA"]),use_container_width=True,hide_index=True)
+with tabs[4]:
+    st.subheader("Relatório RH")
+    st.dataframe(rh_view,use_container_width=True,hide_index=True)
+with tabs[5]:
+    st.subheader("Detalhamento dos Abastecimentos")
+    st.dataframe(det_view,use_container_width=True,hide_index=True)
+with tabs[6]:
+    st.subheader("Recibo de Premiação")
+    rec_fil=st.selectbox("Filial",filiais_lista,key="rf")
+    rec_mots=["TODOS OS MOTORISTAS (TODAS AS FILIAIS)"]+sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else ["TODOS OS MOTORISTAS (TODAS AS FILIAIS)"]
+    rec_mot=st.selectbox("Motorista",rec_mots,key="rm")
+    rec_fac=st.text_input("Fator Carga",value="50%")
+    if st.button("📄 Gerar recibo",key="rr"):
+        html=gerar_recibos_lote(rec_fil,rec_mot,dt_ini.strftime('%d/%m/%Y'),dt_fim.strftime('%d/%m/%Y'),rec_fac,res_f)
+        st.components.v1.html(html,height=900,scrolling=True)
+with tabs[7]:
+    st.subheader("Lançamento de Ausências")
+    st.info("Competência: dia 26 até dia 25. O período é contado de forma inclusiva.")
+    a_mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
+    if a_mots:
+        am=st.selectbox("Motorista",a_mots,key="am"); at=st.radio("Tipo",["Atestado Médico","Férias","Outro Afastamento"],horizontal=True,key="at")
+        ai=st.date_input("Data de Início",dt_ini,key="ai"); af=st.date_input("Data Fim",dt_fim,key="af"); ad=calcular_dias_ausencia(ai.strftime('%d/%m/%Y'),af.strftime('%d/%m/%Y')); st.metric("Dias Ausente (calculado)",ad); ao=st.text_input("Observação",key="ao")
+        if st.button("➕ Lançar Ausência",key="aadd"):
+            if ad<=0: st.error("Data final inválida")
+            else:
+                novo=pd.DataFrame([{"MOTORISTA":am,"TIPO_AUSENCIA":at,"DATA_INICIO":ai.strftime('%d/%m/%Y'),"DATA_FIM":af.strftime('%d/%m/%Y'),"DIAS":ad,"OBSERVACAO":ao}]); st.session_state.ausencias=pd.concat([st.session_state.ausencias,novo],ignore_index=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
+    st.dataframe(st.session_state.ausencias,use_container_width=True,hide_index=True)
+    if not st.session_state.ausencias.empty:
+        opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
+        if st.button("🗑️ Excluir registro selecionado",key="axx"):
+            idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
+with tabs[8]:
+    st.subheader("Gestão de Desclassificações (Pilar 1)")
+    d_mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
+    if d_mots:
+        dm=st.selectbox("Motorista",d_mots,key="dm"); dc=st.selectbox("Critério / Infração",CRITERIOS_PILAR_1,key="dc"); dp=st.number_input("Pontos / Eventos",min_value=1,value=1); do=st.text_input("Observação",key="do")
+        if st.button("➕ Lançar",key="dadd"):
+            num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1; ti="DESCLASSIFICADO" if num>=5 else "PONTOS"; novo=pd.DataFrame([{"MOTORISTA":dm,"CRITERIO":dc,"PONTOS":dp,"TIPO_IMPACTO":ti,"OBSERVACAO":do}]); st.session_state.desclassificacoes=pd.concat([st.session_state.desclassificacoes,novo],ignore_index=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
+    st.dataframe(st.session_state.desclassificacoes,use_container_width=True,hide_index=True)
+    if not st.session_state.desclassificacoes.empty:
+        opts=[descl_label(i,r) for i,r in st.session_state.desclassificacoes.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="dx");
+        if st.button("🗑️ Excluir registro selecionado",key="dxx"):
+            idx=int(sel.split(']')[0].replace('[','')); st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
 
-    if not placa_norm:
-      msg = "⚠️ Selecione uma placa válida para esse motorista."
-      res_empty = aplicar_filtros(
-          dt_ini, dt_fim, mot, plc, cat, fil, aus_df, descl_df, map_cat_st
-      )
-      return (msg, map_cat_st, gerar_df_custom(map_cat_st)) + res_empty
-
-    if not cat_escolhida:
-      msg = "⚠️ Selecione a categoria que será considerada para pagamento."
-      res_empty = aplicar_filtros(
-          dt_ini, dt_fim, mot, plc, cat, fil, aus_df, descl_df, map_cat_st
-      )
-      return (msg, map_cat_st, gerar_df_custom(map_cat_st)) + res_empty
-
-    map_cat_st = dict(map_cat_st or {})
-    chave = normalizar_chave_categoria_customizada(mot_norm, placa_norm)
-    map_cat_st[chave] = DataUtils.normalizar_texto(cat_escolhida)
-    salvar_categorias_customizadas(map_cat_st)
-
-    res = aplicar_filtros(
-        dt_ini, dt_fim, mot, plc, cat, fil, aus_df, descl_df, map_cat_st
-    )
-    msg = (
-        f"✅ Categoria **{cat_escolhida}** salva para o motorista "
-        f"**{mot_norm}** na placa **{placa_norm}**."
-    )
-    grid_c = gerar_df_custom(map_cat_st)
-    return (msg, map_cat_st, grid_c) + res
-
-  def adicionar_ausencia_handler(
-      mot,
-      tipo_aus,
-      dt_ini_aus,
-      dias_aus,
-      obs_aus,
-      aus_df,
-      dt_ini,
-      dt_fim,
-      mot_f,
-      plc_f,
-      cat_f,
-      fil_f,
-      descl_df,
-      map_cat_st,
-  ):
-    if not mot:
-      res_empty = aplicar_filtros(
-          dt_ini,
-          dt_fim,
-          mot_f,
-          plc_f,
-          cat_f,
-          fil_f,
-          aus_df,
-          descl_df,
-          map_cat_st,
-      )
-      return (aus_df,) + res_empty
-
-    novo_reg = pd.DataFrame([{
-        "MOTORISTA": mot,
-        "TIPO_AUSENCIA": tipo_aus,
-        "DATA_INICIO": dt_ini_aus,
-        "DIAS": dias_aus,
-        "OBSERVACAO": obs_aus,
-    }])
-    novo_aus_df = pd.concat([aus_df, novo_reg], ignore_index=True)
-    salvar_ausencias(novo_aus_df)
-
-    res = aplicar_filtros(
-        dt_ini,
-        dt_fim,
-        mot_f,
-        plc_f,
-        cat_f,
-        fil_f,
-        novo_aus_df,
-        descl_df,
-        map_cat_st,
-    )
-    return (novo_aus_df,) + res
-
-  def limpar_ausencias_handler(
-      dt_ini, dt_fim, mot_f, plc_f, cat_f, fil_f, descl_df, map_cat_st
-  ):
-    df_vazio = pd.DataFrame(
-        columns=[
-            "MOTORISTA",
-            "TIPO_AUSENCIA",
-            "DATA_INICIO",
-            "DIAS",
-            "OBSERVACAO",
-        ]
-    )
-    salvar_ausencias(df_vazio)
-    res = aplicar_filtros(
-        dt_ini,
-        dt_fim,
-        mot_f,
-        plc_f,
-        cat_f,
-        fil_f,
-        df_vazio,
-        descl_df,
-        map_cat_st,
-    )
-    return (df_vazio,) + res
-
-  def adicionar_desclassificacao_handler(
-      mot,
-      crit,
-      pontos,
-      obs,
-      descl_df,
-      dt_ini,
-      dt_fim,
-      mot_f,
-      plc_f,
-      cat_f,
-      fil_f,
-      aus_df,
-      map_cat_st,
-  ):
-    if not mot:
-      res_empty = aplicar_filtros(
-          dt_ini,
-          dt_fim,
-          mot_f,
-          plc_f,
-          cat_f,
-          fil_f,
-          aus_df,
-          descl_df,
-          map_cat_st,
-      )
-      drop_e = gerar_opcoes_exclusao_descl(descl_df)
-      return (descl_df, drop_e) + res_empty
-
-    num_crit = int(crit.split("-")[0].strip()) if "-" in crit else 1
-    tipo_impacto = "DESCLASSIFICADO" if num_crit >= 5 else "PONTOS"
-
-    novo_reg = pd.DataFrame([{
-        "MOTORISTA": mot,
-        "CRITERIO": crit,
-        "PONTOS": pontos,
-        "TIPO_IMPACTO": tipo_impacto,
-        "OBSERVACAO": obs,
-    }])
-    novo_descl_df = pd.concat([descl_df, novo_reg], ignore_index=True)
-    salvar_desclassificacoes(novo_descl_df)
-
-    res = aplicar_filtros(
-        dt_ini,
-        dt_fim,
-        mot_f,
-        plc_f,
-        cat_f,
-        fil_f,
-        aus_df,
-        novo_descl_df,
-        map_cat_st,
-    )
-    drop_e = gerar_opcoes_exclusao_descl(novo_descl_df)
-    return (novo_descl_df, drop_e) + res
-
-  def excluir_desclassificacao_item_handler(
-      item_sel,
-      descl_df,
-      dt_ini,
-      dt_fim,
-      mot_f,
-      plc_f,
-      cat_f,
-      fil_f,
-      aus_df,
-      map_cat_st,
-  ):
-    if not item_sel or "Nenhum" in item_sel:
-      res_empty = aplicar_filtros(
-          dt_ini,
-          dt_fim,
-          mot_f,
-          plc_f,
-          cat_f,
-          fil_f,
-          aus_df,
-          descl_df,
-          map_cat_st,
-      )
-      drop_e = gerar_opcoes_exclusao_descl(descl_df)
-      return (descl_df, drop_e) + res_empty
-
-    try:
-      idx = int(item_sel.split("]")[0].replace("[", ""))
-      novo_descl_df = descl_df.drop(index=idx).reset_index(drop=True)
-      salvar_desclassificacoes(novo_descl_df)
-    except Exception:
-      novo_descl_df = descl_df
-
-    res = aplicar_filtros(
-        dt_ini,
-        dt_fim,
-        mot_f,
-        plc_f,
-        cat_f,
-        fil_f,
-        aus_df,
-        novo_descl_df,
-        map_cat_st,
-    )
-    drop_e = gerar_opcoes_exclusao_descl(novo_descl_df)
-    return (novo_descl_df, drop_e) + res
-
-  def limpar_desclassificacoes_handler(
-      dt_ini, dt_fim, mot_f, plc_f, cat_f, fil_f, aus_df, map_cat_st
-  ):
-    df_vazio = pd.DataFrame(
-        columns=[
-            "MOTORISTA",
-            "CRITERIO",
-            "PONTOS",
-            "TIPO_IMPACTO",
-            "OBSERVACAO",
-        ]
-    )
-    salvar_desclassificacoes(df_vazio)
-    res = aplicar_filtros(
-        dt_ini,
-        dt_fim,
-        mot_f,
-        plc_f,
-        cat_f,
-        fil_f,
-        aus_df,
-        df_vazio,
-        map_cat_st,
-    )
-    drop_e = gerar_opcoes_exclusao_descl(df_vazio)
-    return (df_vazio, drop_e) + res
-
-  # Mapeamento de botões e ações
-  btn_aplicar.click(
-      fn=aplicar_filtros,
-      inputs=[
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_ausencias,
-          state_desclassificacoes,
-          state_cat_custom,
-      ],
-      outputs=[
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  )
-
-  btn_limpar.click(
-      fn=lambda aus_df, descl_df, map_cat: (
-          min_date_default,
-          max_date_default,
-          "TODOS",
-          "",
-          "TODAS",
-          "TODAS",
-      )
-      + aplicar_filtros(
-          min_date_default,
-          max_date_default,
-          "TODOS",
-          "",
-          "TODAS",
-          "TODAS",
-          aus_df,
-          descl_df,
-          map_cat,
-      ),
-      inputs=[state_ausencias, state_desclassificacoes, state_cat_custom],
-      outputs=[
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  )
-
-  btn_cad_mot.click(
-      fn=adicionar_motorista_cad,
-      inputs=[in_cad_mot_nome, in_cad_mot_tipo, in_cad_mot_base],
-      outputs=[out_msg_mot, grid_cad_motoristas],
-  )
-
-  btn_cad_frota.click(
-      fn=adicionar_placa_frota,
-      inputs=[in_cad_placa, in_cad_placa_tipo],
-      outputs=[out_msg_frota, grid_cad_frota],
-  )
-
-  btn_inativar_mot.click(
-      fn=lambda m: gerenciar_status_motorista(m, True),
-      inputs=[inativar_mot_dropdown],
-      outputs=[out_msg_inativar_mot, grid_cad_motoristas],
-  )
-
-  btn_reativar_mot.click(
-      fn=lambda m: gerenciar_status_motorista(m, False),
-      inputs=[inativar_mot_dropdown],
-      outputs=[out_msg_inativar_mot, grid_cad_motoristas],
-  )
-
-  btn_inativar_placa.click(
-      fn=lambda p: gerenciar_status_placa(p, True),
-      inputs=[inativar_placa_dropdown],
-      outputs=[out_msg_inativar_placa, grid_cad_frota],
-  )
-
-  btn_reativar_placa.click(
-      fn=lambda p: gerenciar_status_placa(p, False),
-      inputs=[inativar_placa_dropdown],
-      outputs=[out_msg_inativar_placa, grid_cad_frota],
-  )
-
-  # Ao trocar o motorista, atualiza automaticamente a lista de placas disponíveis.
-  def atualizar_placas_do_motorista(mot_chave):
-    placas = placas_iniciais_do_motorista(mot_chave)
-    return gr.Dropdown(
-        choices=placas,
-        value=placas[0] if placas else None,
-        interactive=bool(placas),
-    )
-
-  sel_mot_multi.change(
-      fn=atualizar_placas_do_motorista,
-      inputs=[sel_mot_multi],
-      outputs=[sel_placa_multi],
-  )
-
-  btn_salvar_cat_marca.click(
-      fn=salvar_categoria_customizada_handler,
-      inputs=[
-          sel_mot_multi,
-          sel_placa_multi,
-          sel_cat_marca,
-          state_cat_custom,
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_ausencias,
-          state_desclassificacoes,
-      ],
-      outputs=[
-          out_msg_cat,
-          state_cat_custom,
-          grid_custom_cats,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  )
-
-  btn_recibo.click(
-      fn=gerar_recibos_lote,
-      inputs=[rec_fil, rec_mot, rec_ini, rec_fim, rec_fator, state_resumo],
-      outputs=[recibo_output],
-  )
-
-  btn_add_ausencia.click(
-      fn=adicionar_ausencia_handler,
-      inputs=[
-          aus_mot,
-          aus_tipo,
-          aus_data,
-          aus_dias,
-          aus_obs,
-          state_ausencias,
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_desclassificacoes,
-          state_cat_custom,
-      ],
-      outputs=[
-          state_ausencias,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  ).then(
-      fn=lambda aus_df: aus_df, inputs=[state_ausencias], outputs=[grid_ausencias]
-  )
-
-  btn_limpar_ausencias.click(
-      fn=limpar_ausencias_handler,
-      inputs=[
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_desclassificacoes,
-          state_cat_custom,
-      ],
-      outputs=[
-          state_ausencias,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  ).then(
-      fn=lambda aus_df: aus_df, inputs=[state_ausencias], outputs=[grid_ausencias]
-  )
-
-  btn_add_desclassificacao.click(
-      fn=adicionar_desclassificacao_handler,
-      inputs=[
-          descl_mot,
-          descl_crit,
-          descl_pontos,
-          descl_obs,
-          state_desclassificacoes,
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_ausencias,
-          state_cat_custom,
-      ],
-      outputs=[
-          state_desclassificacoes,
-          descl_excluir_sel,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  ).then(
-      fn=lambda descl_df: descl_df,
-      inputs=[state_desclassificacoes],
-      outputs=[grid_desclassificacoes],
-  )
-
-  btn_excluir_item_descl.click(
-      fn=excluir_desclassificacao_item_handler,
-      inputs=[
-          descl_excluir_sel,
-          state_desclassificacoes,
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_ausencias,
-          state_cat_custom,
-      ],
-      outputs=[
-          state_desclassificacoes,
-          descl_excluir_sel,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  ).then(
-      fn=lambda descl_df: descl_df,
-      inputs=[state_desclassificacoes],
-      outputs=[grid_desclassificacoes],
-  )
-
-  btn_limpar_desclassificacoes.click(
-      fn=limpar_desclassificacoes_handler,
-      inputs=[
-          f_dt_ini,
-          f_dt_fim,
-          f_mot,
-          f_plc,
-          f_cat,
-          f_fil,
-          state_ausencias,
-          state_cat_custom,
-      ],
-      outputs=[
-          state_desclassificacoes,
-          descl_excluir_sel,
-          kpi_p,
-          kpi_gasto_comb,
-          kpi_k,
-          kpi_l,
-          kpi_avg,
-          kpi_m,
-          grid_resumo,
-          grid_rh,
-          grid_eventos,
-          grid_multi_placas,
-          sel_mot_multi,
-          state_resumo,
-      ],
-  ).then(
-      fn=lambda descl_df: descl_df,
-      inputs=[state_desclassificacoes],
-      outputs=[grid_desclassificacoes],
-  )
-
-if __name__ == "__main__":
-  port = int(os.getenv("PORT", 7860))
-  app.launch(server_name="0.0.0.0", server_port=port)
