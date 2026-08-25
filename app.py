@@ -1508,10 +1508,69 @@ CRITERIOS_PILAR_1 = [
 # ================================================================
 # RECALCULO DE AUSÊNCIAS E DESCLASSIFICAÇÕES
 # ================================================================
+def _dias_ausencia_por_competencia(
+    df_ausencias: pd.DataFrame,
+    data_inicio_comp,
+    data_fim_comp,
+) -> dict:
+    """Distribui cada afastamento somente pelos dias que caem na competência 26-25.
+
+    Registros antigos sem DATA_FIM usam DATA_INICIO + DIAS - 1 como fim.
+    Retorna um mapa MOTORISTA normalizado -> dias de ausência dentro da competência.
+    """
+    if df_ausencias is None or df_ausencias.empty or "MOTORISTA" not in df_ausencias.columns:
+        return {}
+
+    ini_comp = parse_data_filtro(data_inicio_comp)
+    fim_comp = parse_data_filtro(data_fim_comp)
+    if ini_comp is None or fim_comp is None:
+        return {}
+
+    ini_comp = pd.Timestamp(ini_comp).normalize()
+    fim_comp = pd.Timestamp(fim_comp).normalize()
+    acumulado = {}
+
+    for _, row in df_ausencias.iterrows():
+        mot = DataUtils.normalizar_texto(row.get("MOTORISTA", ""))
+        if not mot:
+            continue
+
+        dt_ini = parse_data_filtro(row.get("DATA_INICIO", ""))
+        if dt_ini is None or pd.isna(dt_ini):
+            continue
+        dt_ini = pd.Timestamp(dt_ini).normalize()
+
+        dt_fim = parse_data_filtro(row.get("DATA_FIM", ""))
+        if dt_fim is None or pd.isna(dt_fim):
+            dias = pd.to_numeric(row.get("DIAS", 0), errors="coerce")
+            try:
+                dias = int(dias)
+            except Exception:
+                dias = 0
+            if dias <= 0:
+                continue
+            dt_fim = dt_ini + pd.Timedelta(days=dias - 1)
+        else:
+            dt_fim = pd.Timestamp(dt_fim).normalize()
+
+        if dt_fim < dt_ini:
+            continue
+
+        inicio_intersecao = max(dt_ini, ini_comp)
+        fim_intersecao = min(dt_fim, fim_comp)
+        if inicio_intersecao <= fim_intersecao:
+            dias_intersecao = int((fim_intersecao - inicio_intersecao).days + 1)
+            acumulado[mot] = acumulado.get(mot, 0) + dias_intersecao
+
+    return acumulado
+
+
 def aplicar_regras_gerais(
     df_resumo_original: pd.DataFrame,
     df_ausencias: pd.DataFrame,
     df_desclassificacoes: pd.DataFrame,
+    data_inicio_comp=None,
+    data_fim_comp=None,
 ) -> pd.DataFrame:
   if df_resumo_original.empty:
     return df_resumo_original.copy()
@@ -1530,15 +1589,26 @@ def aplicar_regras_gerais(
   res["MOTIVO_DESCLASSIFICACAO"] = motivos_iniciais
 
   if not df_ausencias.empty and "MOTORISTA" in df_ausencias.columns:
-    df_aus_tmp = df_ausencias.copy()
-    df_aus_tmp["DIAS"] = pd.to_numeric(
-        df_aus_tmp["DIAS"], errors="coerce"
-    ).fillna(0)
-    soma_dias = df_aus_tmp.groupby("MOTORISTA")["DIAS"].sum().to_dict()
+    if data_inicio_comp is not None and data_fim_comp is not None:
+        soma_dias = _dias_ausencia_por_competencia(
+            df_ausencias, data_inicio_comp, data_fim_comp
+        )
+    else:
+        # Compatibilidade com chamadas antigas: soma total dos afastamentos.
+        df_aus_tmp = df_ausencias.copy()
+        df_aus_tmp["DIAS"] = pd.to_numeric(
+            df_aus_tmp["DIAS"], errors="coerce"
+        ).fillna(0)
+        soma_dias = {
+            DataUtils.normalizar_texto(k): int(v)
+            for k, v in df_aus_tmp.groupby("MOTORISTA")["DIAS"].sum().to_dict().items()
+        }
 
     res["DIAS_AUSENCIA"] = (
-        res["MOTORISTA"].map(soma_dias).fillna(0).astype(int)
+        res["MOTORISTA"].apply(DataUtils.normalizar_texto).map(soma_dias).fillna(0).astype(int)
     )
+    # A régua de prêmio continua sendo baseada em 30 dias.
+    # O diferencial é que os dias de afastamento agora pertencem somente à competência correta.
     res["DIAS_EFETIVOS"] = np.maximum(0, 30 - res["DIAS_AUSENCIA"])
     res["PREMIO"] = res.apply(
         lambda r: max(0.0, r["PREMIO_BRUTO"] * (r["DIAS_EFETIVOS"] / 30.0)),
@@ -1776,7 +1846,11 @@ def aplicar_filtros(
       evt_f, precos, cadastro, categorias_customizadas=mapa_cat_custom
   )
   res_f = aplicar_regras_gerais(
-      resumo_periodo, df_ausencias, df_desclassificacoes
+      resumo_periodo,
+      df_ausencias,
+      df_desclassificacoes,
+      data_inicio_comp=d_i,
+      data_fim_comp=d_f,
   )
 
   df_multi, mots_multi = gerar_dados_multiplas_placas(evt_f)
@@ -2287,6 +2361,11 @@ with st.sidebar:
         help="Ex.: Competência 08/2026 = 26/07/2026 a 25/08/2026."
     )
     dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
+
+    st.info(
+        "As férias e demais afastamentos são rateados automaticamente entre as competências 26→25. "
+        "Ex.: 04/08→02/09 = 22 dias na competência 26/07→25/08 e 8 dias na competência 26/08→25/09."
+    )
 
     st.markdown(
         f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
