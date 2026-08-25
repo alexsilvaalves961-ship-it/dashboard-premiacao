@@ -1,15 +1,14 @@
- import os
- import re
- import unicodedata
- from dataclasses import dataclass
- from datetime import datetime, date
- from typing import Optional, Tuple
+import os
+import re
+import unicodedata
+from dataclasses import dataclass
+from datetime import datetime, date
+from typing import Optional, Tuple
 
- import streamlit as st
- import numpy as np
- import openpyxl
- import pandas as pd
-
+import streamlit as st
+import numpy as np
+import openpyxl
+import pandas as pd
 
 # ================================================================
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA (LOCAL / RAILWAY)
