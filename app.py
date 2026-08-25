@@ -2305,8 +2305,68 @@ kpis=st.columns(6)
 for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
     c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
 
-tabs=st.tabs(["📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações","🚨 Excesso de Velocidade","⏱️ Controle de Jornada"])
+tabs=st.tabs(["📈 Dashboard Gráfico","📊 Resumo","⚙️ Cadastros","🚚 Múltiplas Placas","🏷️ Categorias por Placa","👔 Relatório RH","⛽ Abastecimentos","📄 Recibos","🏥 Ausências","🚫 Desclassificações","🚨 Excesso de Velocidade","⏱️ Controle de Jornada"])
 with tabs[0]:
+    st.subheader("📈 Visão Gráfica da Competência")
+    st.caption("Os gráficos abaixo usam exatamente a competência e os filtros selecionados na barra lateral.")
+
+    if res_f.empty:
+        st.info("Não há dados para os filtros selecionados.")
+    else:
+        # KPIs visuais da competência
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("🏆 Prêmio Total", f_premio)
+        g2.metric("📍 KM Rodados", f_km)
+        g3.metric("🧪 Litros", f_litros)
+        g4.metric("🎯 Média KM/L", f_media)
+
+        st.markdown("### 💰 Prêmio por Categoria")
+        premio_cat = (res_f.groupby("CATEGORIA", dropna=False)["PREMIO"].sum()
+                      .sort_values(ascending=False).to_frame("PRÊMIO"))
+        premio_cat.index = premio_cat.index.fillna("SEM CATEGORIA")
+        st.bar_chart(premio_cat, use_container_width=True)
+
+        st.markdown("### 🏢 Prêmio por Filial / Base")
+        premio_filial = (res_f.assign(BASE=res_f["BASE"].fillna("SEM FILIAL"))
+                         .groupby("BASE")["PREMIO"].sum()
+                         .sort_values(ascending=False).to_frame("PRÊMIO"))
+        st.bar_chart(premio_filial, use_container_width=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### ⛽ KM e Litros por Categoria")
+            consumo_cat = (res_f.groupby("CATEGORIA", dropna=False)[["KM_TOTAL", "LITROS_TOTAL"]]
+                           .sum().sort_values("KM_TOTAL", ascending=False))
+            consumo_cat.index = consumo_cat.index.fillna("SEM CATEGORIA")
+            st.bar_chart(consumo_cat, use_container_width=True)
+        with c2:
+            st.markdown("### 🚨 Eventos que impactaram o prêmio")
+            eventos_graf = pd.DataFrame({
+                "Excesso de Velocidade": [int(pd.to_numeric(res_f.get("EVENTOS_EXCESSO_VELOCIDADE", 0), errors="coerce").fillna(0).sum())],
+                "Controle de Jornada": [int(pd.to_numeric(res_f.get("EVENTOS_CONTROLE_JORNADA", 0), errors="coerce").fillna(0).sum())],
+            }, index=["Eventos"]).T
+            st.bar_chart(eventos_graf, use_container_width=True)
+
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown("### 🏅 Top 10 Motoristas por Prêmio")
+            top_mots = (res_f[["MOTORISTA", "PREMIO"]].copy()
+                        .sort_values("PREMIO", ascending=False).head(10)
+                        .set_index("MOTORISTA"))
+            st.bar_chart(top_mots, use_container_width=True)
+        with c4:
+            st.markdown("### 📊 Descontos por Pilar")
+            desconto_cols = {}
+            if "DESCONTO_EXCESSO_VELOCIDADE" in res_f.columns:
+                desconto_cols["Excesso de Velocidade"] = float(pd.to_numeric(res_f["DESCONTO_EXCESSO_VELOCIDADE"], errors="coerce").fillna(0).sum())
+            if "DESCONTO_CONTROLE_JORNADA" in res_f.columns:
+                desconto_cols["Controle de Jornada"] = float(pd.to_numeric(res_f["DESCONTO_CONTROLE_JORNADA"], errors="coerce").fillna(0).sum())
+            if desconto_cols:
+                st.bar_chart(pd.DataFrame.from_dict(desconto_cols, orient="index", columns=["DESCONTO (R$)"]), use_container_width=True)
+            else:
+                st.info("Nenhum desconto de pilar registrado nesta competência.")
+
+with tabs[1]:
     st.subheader("Resumo de Premiações")
     st.dataframe(res_view,use_container_width=True,hide_index=True)
 with tabs[1]:
