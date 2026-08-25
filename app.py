@@ -22,6 +22,7 @@ ARQUIVO_FROTA_CUSTOM = os.path.join(DATA_DIR, "frota_customizada.csv")
 ARQUIVO_MOTORISTAS_CUSTOM = os.path.join(DATA_DIR, "motoristas_customizados.csv")
 ARQUIVO_INATIVOS = os.path.join(DATA_DIR, "inativos.csv")
 ARQUIVO_DATAS_MOTORISTAS = os.path.join(DATA_DIR, "datas_motoristas.csv")
+ARQUIVO_CODIGOS_FUNCIONAIS = os.path.join(DATA_DIR, "codigos_funcionais.csv")
 ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
 ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
 
@@ -361,6 +362,50 @@ def salvar_data_contratacao_motorista(motorista: str, data_contratacao: str):
         "DATA_CONTRATACAO": data_contratacao,
     }])], ignore_index=True)
   df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+
+
+def carregar_codigos_funcionais() -> dict:
+  """Carrega os códigos funcionais persistidos por motorista."""
+  if os.path.exists(ARQUIVO_CODIGOS_FUNCIONAIS):
+    try:
+      df = pd.read_csv(ARQUIVO_CODIGOS_FUNCIONAIS, dtype=str, encoding="utf-8-sig")
+      if "MOTORISTA" in df.columns and "CODIGO_FUNCIONAL" in df.columns:
+        return {
+            DataUtils.normalizar_texto(m): str(c or "").strip()
+            for m, c in zip(df["MOTORISTA"], df["CODIGO_FUNCIONAL"])
+            if str(m).strip()
+        }
+    except Exception as e:
+      print(f"Erro ao carregar códigos funcionais: {e}")
+  return {}
+
+
+def salvar_codigo_funcional_motorista(motorista: str, codigo: str):
+  """Salva/atualiza o código funcional de um motorista."""
+  garantir_diretorio()
+  motorista = DataUtils.normalizar_texto(motorista)
+  codigo = str(codigo or "").strip()
+  df = pd.DataFrame(columns=["MOTORISTA", "CODIGO_FUNCIONAL"])
+  if os.path.exists(ARQUIVO_CODIGOS_FUNCIONAIS):
+    try:
+      df = pd.read_csv(ARQUIVO_CODIGOS_FUNCIONAIS, dtype=str, encoding="utf-8-sig")
+      for c in ["MOTORISTA", "CODIGO_FUNCIONAL"]:
+        if c not in df.columns:
+          df[c] = ""
+      df = df[["MOTORISTA", "CODIGO_FUNCIONAL"]].copy()
+    except Exception:
+      df = pd.DataFrame(columns=["MOTORISTA", "CODIGO_FUNCIONAL"])
+
+  df["MOTORISTA"] = df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+  mask = df["MOTORISTA"] == motorista
+  if mask.any():
+    df.loc[mask, "CODIGO_FUNCIONAL"] = codigo
+  else:
+    df = pd.concat([df, pd.DataFrame([{
+        "MOTORISTA": motorista,
+        "CODIGO_FUNCIONAL": codigo,
+    }])], ignore_index=True)
+  df.to_csv(ARQUIVO_CODIGOS_FUNCIONAIS, index=False, encoding="utf-8-sig")
 
 
 def atualizar_data_inativacao_motorista(motorista: str, data_inativacao: str):
@@ -909,6 +954,10 @@ class DataLoader:
 
     inativos_dict = carregar_inativos().get("MOTORISTA", {})
     datas_contratacao = carregar_datas_motoristas()
+    codigos_funcionais = carregar_codigos_funcionais()
+    cadastro["CODIGO_FUNCIONAL"] = cadastro["MOTORISTA_CADASTRO"].apply(
+        lambda x: codigos_funcionais.get(x, "")
+    )
     cadastro["STATUS"] = cadastro["MOTORISTA_CADASTRO"].apply(
         lambda x: "INATIVO" if x in inativos_dict else "ATIVO"
     )
@@ -1563,7 +1612,14 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
   else:
     df_rh = df_resumo.copy()
 
+  if "CODIGO_FUNCIONAL" not in df_rh.columns:
+    codigos = carregar_codigos_funcionais()
+    df_rh["CODIGO_FUNCIONAL"] = df_rh["MOTORISTA"].apply(
+        lambda x: codigos.get(DataUtils.normalizar_texto(x), "")
+    )
+
   rh_df = pd.DataFrame()
+  rh_df["CÓDIGO FUNCIONAL"] = df_rh.get("CODIGO_FUNCIONAL", "")
   rh_df["NOME"] = df_rh["MOTORISTA"]
   rh_df["FILIAL"] = df_rh["BASE"].fillna("CIANORTE")
 
@@ -1581,6 +1637,28 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
 
   rh_df["VALOR PAGO"] = df_rh["PREMIO"].map(formatar_valor_pago)
   return rh_df
+
+
+def estilizar_rh_zerados(df: pd.DataFrame):
+  """Destaca em vermelho os valores zerados no relatório RH."""
+  if df is None or df.empty:
+    return df
+
+  def _zero(v):
+    try:
+      texto = str(v).strip().upper().replace("R$", "").replace(" ", "")
+      texto = texto.replace(".", "").replace(",", ".")
+      return float(texto) == 0.0
+    except Exception:
+      return False
+
+  def _estilo(v):
+    return "color: red; font-weight: 700" if _zero(v) else ""
+
+  styler = df.style
+  if "VALOR PAGO" in df.columns:
+    styler = styler.map(_estilo, subset=["VALOR PAGO"])
+  return styler
 
 
 # ================================================================
@@ -2146,6 +2224,41 @@ def ausencia_label(i, row):
 def descl_label(i, row):
     return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()}"
 
+def competencia_26_25(data_ref):
+    """Retorna o início e o fim da competência que vai do dia 26 ao dia 25."""
+    d = pd.Timestamp(data_ref).normalize()
+    if d.day >= 26:
+        inicio = d.replace(day=26)
+        fim = (inicio + pd.DateOffset(months=1)).replace(day=25)
+    else:
+        fim = d.replace(day=25)
+        inicio = (fim - pd.DateOffset(months=1)).replace(day=26)
+    return inicio.date(), fim.date()
+
+def gerar_competencias(min_data, max_data):
+    """Gera as competências completas que cobrem o intervalo da base."""
+    inicio, _ = competencia_26_25(min_data)
+    _, fim = competencia_26_25(max_data)
+    competencias = []
+    cursor = pd.Timestamp(inicio)
+    limite = pd.Timestamp(fim)
+    while cursor <= limite:
+        fim_comp = (cursor + pd.DateOffset(months=1)).replace(day=25)
+        competencia_mes = fim_comp.strftime('%m/%Y')
+        label = f"Competência {competencia_mes} — {cursor.strftime('%d/%m/%Y')} a {fim_comp.strftime('%d/%m/%Y')}"
+        competencias.append((label, cursor.date(), fim_comp.date()))
+        cursor = (cursor + pd.DateOffset(months=1)).replace(day=26)
+    return competencias
+
+competencias_disponiveis = gerar_competencias(min_dt, max_dt)
+competencias_labels = [c[0] for c in competencias_disponiveis]
+competencia_padrao = next(
+    (label for label, ini_c, fim_c in competencias_disponiveis
+     if ini_c <= max_dt <= fim_c),
+    competencias_labels[-1] if competencias_labels else ""
+)
+competencia_lookup = {label: (ini_c, fim_c) for label, ini_c, fim_c in competencias_disponiveis}
+
 # Valores iniciais para os filtros
 initial = aplicar_filtros_st(min_dt, max_dt, "TODOS", "", "TODAS", "TODAS")
 res_initial = initial[-1]
@@ -2157,8 +2270,24 @@ st.markdown('''<div class="hero"><div class="logo-bar"><div class="logo">🚚</d
 
 with st.sidebar:
     st.markdown("## 🔎 Filtros")
-    dt_ini = st.date_input("Data início", value=min_dt, format="DD/MM/YYYY")
-    dt_fim = st.date_input("Data fim", value=max_dt, format="DD/MM/YYYY")
+    st.markdown("### 📅 Competência de pagamento")
+    st.caption("Cada competência considera o período do dia 26 ao dia 25 do mês seguinte.")
+    competencia_selecionada = st.selectbox(
+        "Selecionar competência",
+        competencias_labels,
+        index=competencias_labels.index(competencia_padrao) if competencia_padrao in competencias_labels else 0,
+        help="Ex.: Competência 08/2026 = 26/07/2026 a 25/08/2026."
+    )
+    dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
+
+    st.markdown(
+        f"<div style='background:#FFF8CC;border:1px solid #F4D03F;border-radius:10px;padding:10px 12px;margin:8px 0 14px 0;'>"
+        f"<div style='font-size:12px;color:#7A5D00;font-weight:700;'>PERÍODO SELECIONADO</div>"
+        f"<div style='font-size:15px;color:#1F2937;font-weight:800;'>{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
     mot = st.selectbox("Motorista", mots_lista)
     placa = st.text_input("Placa")
     cat = st.selectbox("Categoria", cats_lista)
@@ -2194,6 +2323,11 @@ with tabs[1]:
             key="cad_data_contratacao",
             placeholder="Ex.: 15/03/2026",
         )
+        codigo_funcional_novo = st.text_input(
+            "🆔 Código funcional",
+            key="cad_codigo_funcional",
+            placeholder="Ex.: 12345",
+        )
         if st.button("➕ Cadastrar motorista", key="cad_mot_btn") and n and base:
             df = carregar_motoristas_customizados()
             novo = pd.DataFrame([{
@@ -2204,6 +2338,8 @@ with tabs[1]:
             salvar_motoristas_customizados(pd.concat([df, novo], ignore_index=True))
             if str(data_contratacao_novo).strip():
                 salvar_data_contratacao_motorista(n, data_contratacao_novo)
+            if str(codigo_funcional_novo).strip():
+                salvar_codigo_funcional_motorista(n, codigo_funcional_novo)
             st.cache_resource.clear()
             st.rerun()
 
@@ -2254,7 +2390,9 @@ with tabs[1]:
         data_inativacao_atual = inativos_atual["MOTORISTA"].get(mot_norm, "")
         if mot_escolhido:
             st.write(f"Status atual: {'🔴 INATIVO' if mot_esta_inativo else '🟢 ATIVO'}")
-            d1, d2 = st.columns(2)
+            codigos_funcionais_atual = carregar_codigos_funcionais()
+            codigo_funcional_atual = codigos_funcionais_atual.get(mot_norm, "")
+            d1, d2, d3 = st.columns(3)
             with d1:
                 data_contratacao_edit = st.text_input(
                     "📅 Data de contratação (DD/MM/AAAA)",
@@ -2269,9 +2407,17 @@ with tabs[1]:
                     key=f"data_inativacao_edit_{mot_norm}",
                     placeholder="Ex.: 20/08/2026",
                 )
+            with d3:
+                codigo_funcional_edit = st.text_input(
+                    "🆔 Código funcional",
+                    value=codigo_funcional_atual,
+                    key=f"codigo_funcional_edit_{mot_norm}",
+                    placeholder="Ex.: 12345",
+                )
 
-            if st.button("💾 Salvar Datas do Motorista", key="btn_salvar_datas_mot", use_container_width=True):
+            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", use_container_width=True):
                 salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
+                salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
                     atualizar_data_inativacao_motorista(mot_escolhido, data_inativacao_edit)
                 st.cache_resource.clear()
@@ -2331,7 +2477,7 @@ with tabs[1]:
         })
     st.markdown("##### 👥 Motoristas cadastrados")
     colunas_cad = [c for c in [
-        "MOTORISTA_CADASTRO", "TIPO_CADASTRO", "BASE_CADASTRO",
+        "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO", "BASE_CADASTRO",
         "EH_FOLGUISTA", "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
     ] if c in cadastro_exib.columns]
     cadastro_exib = cadastro_exib[colunas_cad]
@@ -2361,7 +2507,8 @@ with tabs[3]:
     st.dataframe(pd.DataFrame(list(st.session_state.mapa_cat_custom.items()),columns=["MOTORISTA|||PLACA","CATEGORIA"]),use_container_width=True,hide_index=True)
 with tabs[4]:
     st.subheader("Relatório RH")
-    st.dataframe(rh_view,use_container_width=True,hide_index=True)
+    st.caption("Valores zerados são destacados em vermelho.")
+    st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
 with tabs[5]:
     st.subheader("Detalhamento dos Abastecimentos")
     st.dataframe(det_view,use_container_width=True,hide_index=True)
