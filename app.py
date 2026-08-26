@@ -1,4 +1,5 @@
 import os
+import base64
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -2040,7 +2041,7 @@ def gerar_html_unico_recibo(
   hdr_motivo_fg = "#FFFFFF" if eh_desclassificado else "#000000"
 
   return f"""
-    <div class="recibo-card" style="-webkit-print-color-adjust: exact; print-color-adjust: exact; background-color: #FFFFFF; padding: 28px; border-radius: 12px; max-width: 650px; margin: 0 auto 20px auto; font-family: Arial, sans-serif; color: #000000; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); page-break-after: always; break-after: page;">
+    <div class="recibo-card" style="background-color: #FFFFFF; padding: 28px; border-radius: 12px; max-width: 650px; margin: 0 auto 20px auto; font-family: Arial, sans-serif; color: #000000; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); page-break-after: always; break-after: page;">
         <div style="text-align: center; margin-bottom: 12px;">
             <div style="display: inline-block; width: 190px;">
                 <div style="width: 190px; height: 46px; position: relative; border-radius: 2px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid #CBD5E1;">
@@ -2187,29 +2188,8 @@ def gerar_recibos_lote(
   else:
     lista_mots = [motorista_sel]
 
-  recibos_html = ["""
-    <style>
-      .recibo-card, .recibo-card * {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
-      @page { size: A4; margin: 8mm; }
-      @media print {
-        html, body { margin: 0 !important; padding: 0 !important; background: #FFFFFF !important; }
-        .no-print { display: none !important; }
-        .recibo-container { display: block !important; width: 100% !important; margin: 0 !important; padding: 0 !important; }
-        .recibo-card { width: 100% !important; max-width: 650px !important; margin: 0 auto !important; box-shadow: none !important; page-break-after: always !important; break-after: page !important; }
-      }
-    </style>
-    <div class="no-print" style="background: #F8FAFC; border: 1px solid #E2E8F0; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 14px; font-weight: bold; color: #1E293B;">
-            📄 Total de Recibos Prontos: <span style="color: #2563EB;">""" + str(len(lista_mots)) + """</span>
-        </span>
-        <button onclick='(function(){var c=document.querySelector(".recibo-container");if(!c)return;var w=window.open("","_blank","width=900,height=1200");if(!w){alert("Permita pop-ups para imprimir o recibo.");return;}w.document.open();w.document.write("<!doctype html><html><head><meta charset=\"utf-8\"><title>Recibos de Premiação</title><style>@page{size:A4;margin:8mm}html,body{margin:0;padding:0;background:#fff;font-family:Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}.recibo-container{width:100%}.recibo-card{max-width:650px!important;margin:0 auto 20px auto!important;page-break-after:always;break-after:page;box-shadow:none!important;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}</style></head><body><div class=\"recibo-container\">"+c.innerHTML+"</div></body></html>");w.document.close();w.focus();setTimeout(function(){w.print();},350);})()' style="background-color: #2563EB; color: #FFFFFF; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            🖨️ Imprimir Recibo(s)
-        </button>
-    </div>
-    """]
+  recibos_html = []
+
   cards_html = []
   for m_nome in lista_mots:
     row = res_f[res_f["MOTORISTA"] == m_nome]
@@ -2226,13 +2206,42 @@ def gerar_recibos_lote(
         " Inativo).</div>"
     )
 
-  return (
-      "".join(recibos_html)
-      + "<div class='recibo-container' style='display: flex; flex-direction:"
-      " column; gap: 30px;'>"
-      + "".join(cards_html)
-      + "</div>"
-  )
+  cards = "".join(cards_html)
+  cards_b64 = base64.b64encode(cards.encode("utf-8")).decode("ascii")
+  controls_html = f"""
+    <div class="no-print" style="background:#F8FAFC;border:1px solid #CBD5E1;padding:12px 18px;border-radius:10px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
+      <div style="font-size:14px;font-weight:700;color:#17215C;">📄 {len(lista_mots)} recibo(s) pronto(s)</div>
+      <button id="printRecibosBtn" style="background:#17215C;color:#FFFFFF;border:0;padding:10px 18px;border-radius:8px;font-weight:800;cursor:pointer;font-size:13px;">🖨️ Imprimir recibo(s)</button>
+    </div>
+    <script>
+    (() => {{
+      const btn = document.getElementById('printRecibosBtn');
+      if (!btn) return;
+      const b64 = '{cards_b64}';
+      btn.addEventListener('click', () => {{
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const html = new TextDecoder('utf-8').decode(bytes);
+        const w = window.open('', '_blank', 'width=1000,height=800');
+        if (!w) {{
+          alert('O navegador bloqueou a janela de impressão. Libere os pop-ups para este site e tente novamente.');
+          return;
+        }}
+        w.document.open();
+        w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Recibos de Premiação</title><style>
+          @page {{ size:A4; margin:10mm; }}
+          * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+          html,body {{ margin:0; padding:0; background:#fff; color:#000; font-family:Arial,sans-serif; }}
+          .recibo-container {{ width:100%; }}
+          .recibo-card {{ break-after:page; page-break-after:always; box-shadow:none !important; margin:0 auto !important; }}
+          .recibo-card:last-child {{ break-after:auto; page-break-after:auto; }}
+        </style></head><body><div class="recibo-container">${{html}}</div><script>window.onload=()=>{{setTimeout(()=>window.print(),350);}}<\/script></body></html>`);
+        w.document.close();
+        w.focus();
+      }});
+    }})();
+    </script>
+  """
+  return controls_html + "<div class='recibo-container' style='display:flex;flex-direction:column;gap:30px;'>" + cards + "</div>"
 
 
 
