@@ -2192,18 +2192,41 @@ def gerar_recibos_lote(
 
   recibos_html = [f"""
     <style>
+    /* A impressão é feita na própria página Streamlit, não dentro de iframe. */
+    @page {{ size: A4; margin: 10mm; }}
     @media print {{
-        body * {{ visibility: hidden; }}
-        .recibo-container, .recibo-container * {{ visibility: visible; }}
-        .recibo-container {{ position: absolute; left: 0; top: 0; width: 100%; }}
+        html, body {{ background: #FFFFFF !important; }}
+        body * {{ visibility: hidden !important; }}
+        .recibo-print-zone, .recibo-print-zone * {{ visibility: visible !important; }}
+        .recibo-print-zone {{
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #FFFFFF !important;
+        }}
         .no-print {{ display: none !important; }}
+        .recibo-card {{
+            box-shadow: none !important;
+            border: 1px solid #CBD5E1 !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+        }}
+        .recibo-card:last-child {{
+            page-break-after: auto !important;
+            break-after: auto !important;
+        }}
     }}
     </style>
-    <div class="no-print" style="background: #F8FAFC; border: 1px solid #E2E8F0; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 14px; font-weight: bold; color: #1E293B;">
-            📄 Total de Recibos Prontos: <span style="color: #2563EB;">{len(lista_mots)}</span>
+    <div class="no-print" style="background:#F8FAFC;border:1px solid #E2E8F0;padding:12px 20px;border-radius:8px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:14px;font-weight:bold;color:#1E293B;">
+            📄 Total de Recibos Prontos: <span style="color:#2563EB;">{len(lista_mots)}</span>
         </span>
-        <button onclick="window.print()" style="background-color: #2563EB; color: #FFFFFF; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+        <button onclick="window.print(); return false;" style="background-color:#2563EB;color:#FFFFFF;border:none;padding:8px 18px;border-radius:6px;font-weight:bold;cursor:pointer;font-size:13px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
             🖨️ Imprimir Todos os Recibos ({len(lista_mots)})
         </button>
     </div>
@@ -3104,8 +3127,16 @@ with tabs[6]:
     rec_mot=st.selectbox("Motorista",rec_mots,key="rm")
     rec_fac=st.text_input("Fator Carga",value="50%")
     if st.button("📄 Gerar recibo",key="rr"):
-        html=gerar_recibos_lote(rec_fil,rec_mot,dt_ini.strftime('%d/%m/%Y'),dt_fim.strftime('%d/%m/%Y'),rec_fac,res_f)
-        st.components.v1.html(html,height=900,scrolling=True)
+        st.session_state["recibos_html_gerados"] = gerar_recibos_lote(
+            rec_fil,
+            rec_mot,
+            dt_ini.strftime('%d/%m/%Y'),
+            dt_fim.strftime('%d/%m/%Y'),
+            rec_fac,
+            res_f,
+        )
+    if st.session_state.get("recibos_html_gerados"):
+        st.markdown(st.session_state["recibos_html_gerados"], unsafe_allow_html=True)
 with tabs[7]:
     if is_admin:
         st.subheader("Lançamento de Ausências")
