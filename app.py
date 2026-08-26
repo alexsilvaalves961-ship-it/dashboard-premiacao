@@ -2877,7 +2877,7 @@ with tabs[5]:
                     placeholder="Ex.: 12345",
                 )
 
-            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
+            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin), use_container_width=True):
                 salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
                 salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
@@ -3041,7 +3041,7 @@ with tabs[4]:
 
             ac1, ac2 = st.columns(2)
             with ac1:
-                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
+                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin), use_container_width=True):
                     chave_antiga = reg_cat["_CHAVE"]
                     chave_nova = normalizar_chave_categoria_customizada(mot_edit, placa_edit)
                     novo_mapa = dict(st.session_state.mapa_cat_custom)
