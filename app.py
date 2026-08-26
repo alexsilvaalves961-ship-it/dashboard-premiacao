@@ -20,6 +20,31 @@ import matplotlib.pyplot as plt
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA (LOCAL / RAILWAY)
 # ================================================================
 DATA_DIR = os.getenv("DATA_DIR", ".")
+
+# Arquivos mensais de viagens: exemplo "viagens 08_2026.xlsx".
+# O aplicativo procura automaticamente todos os arquivos nesse padrão no mesmo diretório
+# dos demais arquivos hospedeiros.
+def _listar_arquivos_viagens():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  for nome in nomes:
+    if re.fullmatch(r"viagens\s+\d{2}_\d{4}\.(xlsx|xlsm|xls)", nome, flags=re.IGNORECASE):
+      encontrados.append(os.path.join(diretorio, nome))
+  return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
+
+def _token_arquivos_viagens():
+  token = []
+  for caminho in _listar_arquivos_viagens():
+    try:
+      token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError:
+      token.append((caminho, 0.0, 0))
+  return tuple(token)
+
 ARQUIVO_AUSENCIAS = os.path.join(DATA_DIR, "ausencias.csv")
 ARQUIVO_DESCLASSIFICACOES = os.path.join(DATA_DIR, "desclassificacoes.csv")
 ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv")
@@ -764,6 +789,44 @@ def parse_data_filtro(val) -> Optional[pd.Timestamp]:
     return None
 
 
+def _parse_datetime_flex(valor) -> pd.Timestamp:
+  """Converte datas/horas, inclusive serial do Excel, preservando o horário."""
+  if valor is None:
+    return pd.NaT
+  try:
+    if pd.isna(valor):
+      return pd.NaT
+  except Exception:
+    pass
+
+  if isinstance(valor, (pd.Timestamp, datetime, np.datetime64)):
+    try:
+      return pd.Timestamp(valor)
+    except Exception:
+      return pd.NaT
+
+  if isinstance(valor, (int, float, np.integer, np.floating)):
+    try:
+      n = float(valor)
+      if n > 20000:
+        return pd.to_datetime(n, unit="D", origin="1899-12-30", errors="coerce")
+      if 0 <= n < 1:
+        return pd.Timestamp("1899-12-30") + pd.to_timedelta(n, unit="D")
+    except Exception:
+      return pd.NaT
+
+  texto = str(valor).strip()
+  if not texto:
+    return pd.NaT
+  try:
+    dt = pd.to_datetime(texto, dayfirst=True, errors="coerce")
+    if pd.notna(dt):
+      return pd.Timestamp(dt)
+  except Exception:
+    pass
+  return pd.NaT
+
+
 def criar_data_filtro(valor) -> pd.Timestamp:
   parsed = parse_data_filtro(valor)
   return parsed if parsed is not None else pd.NaT
@@ -980,6 +1043,69 @@ class DataLoader:
 
     return cadastro
 
+  def carregar_viagens(self) -> pd.DataFrame:
+    """Carrega automaticamente os arquivos mensais "viagens MM_YYYY.xlsx".
+
+    O cruzamento usa placa + faixa de odômetro e prioriza a janela de data/hora da viagem.
+    Arquivos de todos os meses disponíveis são aceitos para cobrir viagens iniciadas em
+    um mês e abastecimentos ocorridos no mês seguinte.
+    """
+    arquivos = _listar_arquivos_viagens()
+    if not arquivos:
+      return pd.DataFrame()
+
+    registros = []
+    for caminho in arquivos:
+      try:
+        bruto = pd.read_excel(caminho, sheet_name=0, dtype=object, keep_default_na=False)
+        if bruto.empty:
+          continue
+
+        col_dt_ini = DataUtils.encontrar_coluna(bruto, ["Dt Macro Inicial", "DATA INICIAL", "INICIO VIAGEM"])
+        col_dt_fim = DataUtils.encontrar_coluna(bruto, ["Dt Macro Final", "DATA FINAL", "FIM VIAGEM"])
+        col_odm_ini = DataUtils.encontrar_coluna(bruto, ["Odm Inicial", "ODM INICIAL", "KM INICIAL"])
+        col_odm_fim = DataUtils.encontrar_coluna(bruto, ["Odm Final", "ODM FINAL", "KM FINAL"])
+        col_km_total = DataUtils.encontrar_coluna(bruto, ["Km Total", "KM TOTAL"])
+        col_motorista = DataUtils.encontrar_coluna(bruto, ["Motorista", "CONDUTOR", "MOTORISTA"])
+        col_placa = DataUtils.encontrar_coluna(bruto, ["Dim Veiculo Enterprise - Sk Veiculo → Placa", "PLACA", "CAVALO"])
+        col_origem = DataUtils.encontrar_coluna(bruto, ["Cidade Inicial", "ORIGEM", "CIDADE ORIGEM"])
+        col_destino = DataUtils.encontrar_coluna(bruto, ["Cidade Final", "DESTINO", "CIDADE DESTINO"])
+
+        obrigatorias = [col_dt_ini, col_dt_fim, col_odm_ini, col_odm_fim, col_motorista, col_placa]
+        if any(c is None for c in obrigatorias):
+          print(f"Arquivo de viagens ignorado por colunas ausentes: {os.path.basename(caminho)}")
+          continue
+
+        out = pd.DataFrame(index=bruto.index)
+        out["VIAGEM_DATA_INICIO"] = bruto[col_dt_ini].apply(_parse_datetime_flex)
+        out["VIAGEM_DATA_FIM"] = bruto[col_dt_fim].apply(_parse_datetime_flex)
+        out["VIAGEM_ODM_INICIAL"] = bruto[col_odm_ini].apply(DataUtils.converter_numero)
+        out["VIAGEM_ODM_FINAL"] = bruto[col_odm_fim].apply(DataUtils.converter_numero)
+        out["VIAGEM_KM_TOTAL"] = bruto[col_km_total].apply(DataUtils.converter_numero) if col_km_total else np.nan
+        out["MOTORISTA_VIAGEM"] = bruto[col_motorista].apply(DataUtils.normalizar_texto)
+        out["PLACA_VIAGEM"] = bruto[col_placa].apply(DataUtils.padronizar_placa)
+        out["VIAGEM_ORIGEM"] = bruto[col_origem].astype(str).str.strip() if col_origem else ""
+        out["VIAGEM_DESTINO"] = bruto[col_destino].astype(str).str.strip() if col_destino else ""
+        out["VIAGEM_ARQUIVO"] = os.path.basename(caminho)
+
+        out = out[
+            (out["PLACA_VIAGEM"] != "")
+            & out["VIAGEM_ODM_INICIAL"].notna()
+            & out["VIAGEM_ODM_FINAL"].notna()
+            & (out["MOTORISTA_VIAGEM"] != "")
+        ].copy()
+        if not out.empty:
+          # Normaliza viagens que eventualmente estejam registradas com ODM invertido.
+          out["_ODM_MIN"] = out[["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL"]].min(axis=1)
+          out["_ODM_MAX"] = out[["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL"]].max(axis=1)
+          registros.append(out)
+      except Exception as exc:
+        print(f"Erro ao carregar viagens {os.path.basename(caminho)}: {exc}")
+
+    if not registros:
+      return pd.DataFrame()
+    return pd.concat(registros, ignore_index=True)
+
   def carregar_abastecimentos(self, mapa_frota: dict) -> pd.DataFrame:
     df = pd.read_excel(
         self.config.CAMINHO_ABASTECIMENTOS,
@@ -1026,6 +1152,7 @@ class DataLoader:
             "DT ABAST",
         ],
     )
+    col_hora = DataUtils.encontrar_coluna(df, ["HORA", "Hora", "HORARIO", "HORA ABASTECIMENTO"])
 
     resultado = df.copy()
     resultado["_ORDEM_ORIGINAL"] = np.arange(len(resultado))
@@ -1054,10 +1181,32 @@ class DataLoader:
       resultado["DATA_FILTRO"] = resultado[col_data].apply(criar_data_filtro)
       resultado["DATA_NUM"] = resultado["DATA_FILTRO"]
       resultado["DATA"] = resultado["DATA_FILTRO"]
+      resultado["DATA_HORA_ABASTECIMENTO"] = resultado[col_data].apply(_parse_datetime_flex)
+      if col_hora:
+        hora_series = resultado[col_hora].apply(_parse_datetime_flex)
+        mascara_hora = hora_series.notna() & resultado["DATA_HORA_ABASTECIMENTO"].notna()
+        resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"] = (
+            resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"].dt.normalize()
+            + (hora_series.loc[mascara_hora] - pd.Timestamp("1899-12-30")).where(
+                hora_series.loc[mascara_hora] < pd.Timestamp("1900-01-01"),
+                pd.to_timedelta(hora_series.loc[mascara_hora].dt.hour * 3600 + hora_series.loc[mascara_hora].dt.minute * 60 + hora_series.loc[mascara_hora].dt.second, unit="s"),
+            )
+        )
+        # Caso a coluna de hora tenha vindo como datetime-base do Excel, usa somente o horário.
+        resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"] = (
+            resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"].dt.normalize()
+            + pd.to_timedelta(
+                hora_series.loc[mascara_hora].dt.hour * 3600
+                + hora_series.loc[mascara_hora].dt.minute * 60
+                + hora_series.loc[mascara_hora].dt.second,
+                unit="s",
+            )
+        )
     else:
       resultado["DATA_ORIGINAL"] = pd.NaT
       resultado["DATA_NUM"] = pd.NaT
       resultado["DATA_FILTRO"] = pd.NaT
+      resultado["DATA_HORA_ABASTECIMENTO"] = pd.NaT
 
     resultado["TIPO"] = resultado["PLACA_PADRONIZADA"].map(mapa_frota)
 
@@ -1086,6 +1235,125 @@ class DataLoader:
     )
 
     return resultado
+
+
+# ================================================================
+# VALIDAÇÃO DO MOTORISTA PELO HISTÓRICO DE VIAGENS
+# ================================================================
+def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFrame) -> pd.DataFrame:
+  """Cruza cada abastecimento com a viagem compatível do mesmo veículo.
+
+  Critérios, em ordem de confiança:
+  1) mesma placa + KM dentro da faixa ODM + data/hora dentro da viagem;
+  2) mesma placa + KM dentro da faixa ODM + mesma data da viagem;
+  3) mesma placa + KM dentro da faixa ODM, somente quando houver um único candidato.
+
+  O motorista original permanece preservado em MOTORISTA_ABASTECIMENTO_ORIGINAL.
+  Quando o cruzamento é confiável, CONDUTOR_NORMALIZADO passa a ser o motorista da viagem.
+  """
+  base = abastecimentos.copy()
+  base["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = base.get("CONDUTOR_NORMALIZADO", "").astype(str)
+  base["MOTORISTA_VIAGEM"] = ""
+  base["MOTORISTA_CONSIDERADO"] = base["MOTORISTA_ABASTECIMENTO_ORIGINAL"]
+  base["STATUS_VALIDACAO_VIAGEM"] = "SEM ARQUIVO DE VIAGENS" if viagens is None or viagens.empty else "NÃO LOCALIZADO"
+  for c in ["VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO"]:
+    base[c] = ""
+  for c in ["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL", "VIAGEM_KM_TOTAL"]:
+    base[c] = np.nan
+  for c in ["VIAGEM_DATA_INICIO", "VIAGEM_DATA_FIM"]:
+    base[c] = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
+
+  if viagens is None or viagens.empty or base.empty:
+    return base
+
+  viagens = viagens.copy()
+  viagens = viagens[
+      viagens["PLACA_VIAGEM"].notna()
+      & (viagens["PLACA_VIAGEM"].astype(str).str.strip() != "")
+      & viagens["_ODM_MIN"].notna()
+      & viagens["_ODM_MAX"].notna()
+      & viagens["MOTORISTA_VIAGEM"].notna()
+      & (viagens["MOTORISTA_VIAGEM"].astype(str).str.strip() != "")
+  ].copy()
+  if viagens.empty:
+    return base
+
+  por_placa = {placa: grp for placa, grp in viagens.groupby("PLACA_VIAGEM", sort=False)}
+
+  for idx in base.index:
+    placa = str(base.at[idx, "PLACA_PADRONIZADA"] or "").strip()
+    km = pd.to_numeric(base.at[idx, "KM_ATUAL_NUM"], errors="coerce")
+    if not placa or pd.isna(km) or km <= 0 or placa not in por_placa:
+      continue
+
+    cand = por_placa[placa]
+    cand = cand[(cand["_ODM_MIN"] <= float(km)) & (cand["_ODM_MAX"] >= float(km))].copy()
+    if cand.empty:
+      continue
+
+    dt_fuel = base.at[idx, "DATA_HORA_ABASTECIMENTO"] if "DATA_HORA_ABASTECIMENTO" in base.columns else pd.NaT
+    dt_fuel = _parse_datetime_flex(dt_fuel)
+    nivel = "KM_UNICO"
+
+    if pd.notna(dt_fuel):
+      por_datahora = cand[
+          cand["VIAGEM_DATA_INICIO"].notna()
+          & cand["VIAGEM_DATA_FIM"].notna()
+          & (cand["VIAGEM_DATA_INICIO"] <= dt_fuel)
+          & (cand["VIAGEM_DATA_FIM"] >= dt_fuel)
+      ].copy()
+      if not por_datahora.empty:
+        cand = por_datahora
+        nivel = "DATA_HORA"
+      else:
+        data_fuel = pd.Timestamp(dt_fuel).normalize()
+        por_data = cand[
+            cand["VIAGEM_DATA_INICIO"].notna()
+            & cand["VIAGEM_DATA_FIM"].notna()
+            & (cand["VIAGEM_DATA_INICIO"].dt.normalize() <= data_fuel)
+            & (cand["VIAGEM_DATA_FIM"].dt.normalize() >= data_fuel)
+        ].copy()
+        if not por_data.empty:
+          cand = por_data
+          nivel = "DATA"
+
+    if nivel == "KM_UNICO" and len(cand) != 1:
+      # Sem data confiável e com mais de uma viagem compatível, não arriscar atribuição.
+      continue
+
+    # Desempate determinístico: viagem temporalmente mais próxima do abastecimento;
+    # sem horário, usa proximidade do centro da faixa de ODM.
+    if pd.notna(dt_fuel) and cand["VIAGEM_DATA_INICIO"].notna().any():
+      inicio = cand["VIAGEM_DATA_INICIO"].fillna(dt_fuel)
+      fim = cand["VIAGEM_DATA_FIM"].fillna(dt_fuel)
+      meio = inicio + (fim - inicio) / 2
+      cand = cand.assign(_DIST_TEMPO=(meio - dt_fuel).abs())
+      cand = cand.sort_values(["_DIST_TEMPO", "_ODM_MIN"], kind="stable")
+    else:
+      meio_km = (cand["_ODM_MIN"] + cand["_ODM_MAX"]) / 2
+      cand = cand.assign(_DIST_KM=(meio_km - float(km)).abs())
+      cand = cand.sort_values(["_DIST_KM", "_ODM_MIN"], kind="stable")
+
+    viagem = cand.iloc[0]
+    motorista_viagem = DataUtils.normalizar_texto(viagem.get("MOTORISTA_VIAGEM", ""))
+    if not motorista_viagem:
+      continue
+
+    base.at[idx, "MOTORISTA_VIAGEM"] = motorista_viagem
+    base.at[idx, "MOTORISTA_CONSIDERADO"] = motorista_viagem
+    base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "VALIDADO" if base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"] == motorista_viagem else "CORRIGIDO PELA VIAGEM"
+    base.at[idx, "VIAGEM_ORIGEM"] = str(viagem.get("VIAGEM_ORIGEM", ""))
+    base.at[idx, "VIAGEM_DESTINO"] = str(viagem.get("VIAGEM_DESTINO", ""))
+    base.at[idx, "VIAGEM_ARQUIVO"] = str(viagem.get("VIAGEM_ARQUIVO", ""))
+    base.at[idx, "VIAGEM_ODM_INICIAL"] = viagem.get("VIAGEM_ODM_INICIAL", np.nan)
+    base.at[idx, "VIAGEM_ODM_FINAL"] = viagem.get("VIAGEM_ODM_FINAL", np.nan)
+    base.at[idx, "VIAGEM_KM_TOTAL"] = viagem.get("VIAGEM_KM_TOTAL", np.nan)
+    base.at[idx, "VIAGEM_DATA_INICIO"] = viagem.get("VIAGEM_DATA_INICIO", pd.NaT)
+    base.at[idx, "VIAGEM_DATA_FIM"] = viagem.get("VIAGEM_DATA_FIM", pd.NaT)
+
+  # O cálculo de prêmio e todas as telas passam a usar o motorista considerado pela viagem.
+  base["CONDUTOR_NORMALIZADO"] = base["MOTORISTA_CONSIDERADO"].apply(DataUtils.normalizar_texto)
+  return base
 
 
 # ================================================================
@@ -2424,6 +2692,7 @@ _CACHE_BASE_TOKEN = (
     _mtime_arquivo("frota.XLSX"),
     _mtime_arquivo("Pasta4.XLSX"),
     _mtime_arquivo("uah_abastecimentos_3.XLSX"),
+    _token_arquivos_viagens(),
 )
 
 @st.cache_resource(show_spinner=False)
@@ -2434,6 +2703,8 @@ def carregar_base(cache_token=None):
     frota, mapa_frota = loader.carregar_frota()
     cadastro = loader.carregar_cadastro_motoristas()
     abastecimentos = loader.carregar_abastecimentos(mapa_frota)
+    viagens = loader.carregar_viagens()
+    abastecimentos = associar_motorista_viagem(abastecimentos, viagens)
     eventos = engine.calcular_eventos_consumo(abastecimentos)
     return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
 
@@ -2793,71 +3064,6 @@ with tabs[1]:
             resumo_motorista["LITROS"] = resumo_motorista["LITROS"].map(lambda x: f"{_fmt_num(x,1)} L")
         resumo_motorista["MÉDIA KM/L"] = resumo_motorista["MÉDIA KM/L"].map(lambda x: _fmt_num(x,2))
 
-        # ------------------------------------------------------------
-        # Dados adicionais de premiação no Resumo
-        # Mantemos o resumo de abastecimentos e acrescentamos os mesmos
-        # indicadores usados no cálculo final do prêmio/RH.
-        # ------------------------------------------------------------
-        if res_f is not None and not res_f.empty and "MOTORISTA" in res_f.columns:
-            premio_res = res_f.copy()
-            premio_res["MOTORISTA"] = premio_res["MOTORISTA"].astype(str)
-
-            cols_premio = [
-                "MOTORISTA",
-                "MEDIA_CALCULADA",
-                "MEDIA_FAIXA",
-                "PREMIO",
-                "STATUS_PREMIO",
-                "PREMIO_BRUTO",
-                "DIAS_AUSENCIA",
-                "DIAS_EFETIVOS",
-                "MOTIVO_DESCLASSIFICACAO",
-            ]
-            cols_premio = [c for c in cols_premio if c in premio_res.columns]
-            premio_res = premio_res[cols_premio].drop_duplicates("MOTORISTA", keep="last")
-
-            resumo_motorista = resumo_motorista.merge(
-                premio_res, on="MOTORISTA", how="left"
-            )
-
-            # Formatação dos campos adicionais
-            if "MEDIA_CALCULADA" in resumo_motorista.columns:
-                resumo_motorista["MEDIA_CALCULADA"] = pd.to_numeric(
-                    resumo_motorista["MEDIA_CALCULADA"], errors="coerce"
-                ).map(lambda x: _fmt_num(x,2) if pd.notna(x) else "-")
-            if "MEDIA_FAIXA" in resumo_motorista.columns:
-                resumo_motorista["MEDIA_FAIXA"] = pd.to_numeric(
-                    resumo_motorista["MEDIA_FAIXA"], errors="coerce"
-                ).map(lambda x: _fmt_num(x,2) if pd.notna(x) else "-")
-            if "PREMIO" in resumo_motorista.columns:
-                resumo_motorista["PREMIO"] = pd.to_numeric(
-                    resumo_motorista["PREMIO"], errors="coerce"
-                ).fillna(0).map(_fmt_brl)
-            if "PREMIO_BRUTO" in resumo_motorista.columns:
-                resumo_motorista["PREMIO_BRUTO"] = pd.to_numeric(
-                    resumo_motorista["PREMIO_BRUTO"], errors="coerce"
-                ).fillna(0).map(_fmt_brl)
-            if "DIAS_AUSENCIA" in resumo_motorista.columns:
-                resumo_motorista["DIAS_AUSENCIA"] = pd.to_numeric(
-                    resumo_motorista["DIAS_AUSENCIA"], errors="coerce"
-                ).fillna(0).astype(int)
-            if "DIAS_EFETIVOS" in resumo_motorista.columns:
-                resumo_motorista["DIAS_EFETIVOS"] = pd.to_numeric(
-                    resumo_motorista["DIAS_EFETIVOS"], errors="coerce"
-                ).fillna(30).astype(int)
-            if "STATUS_PREMIO" in resumo_motorista.columns:
-                resumo_motorista["STATUS_PREMIO"] = resumo_motorista["STATUS_PREMIO"].fillna("")
-            if "MOTIVO_DESCLASSIFICACAO" in resumo_motorista.columns:
-                resumo_motorista["MOTIVO_DESCLASSIFICACAO"] = resumo_motorista["MOTIVO_DESCLASSIFICACAO"].fillna("")
-
-            # Ordem das colunas: abastecimento primeiro e, em seguida, prêmio.
-            ordem = [
-                "MOTORISTA", "ABASTECIMENTOS", "KM", "LITROS", "GASTO", "MÉDIA KM/L",
-                "MEDIA_CALCULADA", "MEDIA_FAIXA", "PREMIO", "STATUS_PREMIO",
-                "PREMIO_BRUTO", "DIAS_AUSENCIA", "DIAS_EFETIVOS", "MOTIVO_DESCLASSIFICACAO"
-            ]
-            resumo_motorista = resumo_motorista[[c for c in ordem if c in resumo_motorista.columns]]
-
         st.markdown("#### 👥 Resumo por Motorista")
         st.dataframe(resumo_motorista, use_container_width=True, hide_index=True)
 
@@ -3212,7 +3418,18 @@ with tabs[11]:
     st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
 with tabs[2]:
     st.subheader("Detalhamento dos Abastecimentos")
-    st.dataframe(det_view,use_container_width=True,hide_index=True)
+    st.caption("O motorista considerado no cálculo é validado pelo histórico de viagens quando existe correspondência segura por placa, KM e data/hora.")
+    cols_auditoria = [
+        "DATA_FILTRO", "MOTORISTA_ABASTECIMENTO_ORIGINAL", "MOTORISTA_VIAGEM",
+        "MOTORISTA_CONSIDERADO", "STATUS_VALIDACAO_VIAGEM", "PLACA_PADRONIZADA",
+        "TIPO", "KM_ATUAL_NUM", "QTDE_NUM", "VALOR_NUM",
+        "VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO",
+    ]
+    cols_auditoria = [c for c in cols_auditoria if c in det_view.columns]
+    if cols_auditoria:
+        st.dataframe(det_view[cols_auditoria],use_container_width=True,hide_index=True)
+    else:
+        st.dataframe(det_view,use_container_width=True,hide_index=True)
 with tabs[6]:
     st.subheader("Recibo de Premiação")
     rec_fil=st.selectbox("Filial",filiais_lista,key="rf")
