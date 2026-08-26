@@ -6,6 +6,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Optional, Tuple
+import textwrap
 
 import streamlit as st
 import numpy as np
@@ -2192,7 +2193,7 @@ def gerar_recibos_lote(
 
   recibos_html = [f"""
     <style>
-    /* A impressão é feita na própria página Streamlit, não dentro de iframe. */
+    /* Recibo renderizado diretamente no Streamlit; a impressão oculta o restante da página. */
     @page {{ size: A4; margin: 10mm; }}
     @media print {{
         html, body {{ background: #FFFFFF !important; }}
@@ -2248,13 +2249,13 @@ def gerar_recibos_lote(
         " Inativo).</div>"
     )
 
-  return (
+  return textwrap.dedent(
       "".join(recibos_html)
       + "<div class='recibo-container' style='display: flex; flex-direction:"
       " column; gap: 30px;'>"
       + "".join(cards_html)
       + "</div>"
-  )
+  ).strip()
 
 
 
@@ -3136,7 +3137,8 @@ with tabs[6]:
             res_f,
         )
     if st.session_state.get("recibos_html_gerados"):
-        st.markdown(st.session_state["recibos_html_gerados"], unsafe_allow_html=True)
+        recibos_render = textwrap.dedent(str(st.session_state["recibos_html_gerados"])).strip()
+        st.markdown(recibos_render, unsafe_allow_html=True)
 with tabs[7]:
     if is_admin:
         st.subheader("Lançamento de Ausências")
