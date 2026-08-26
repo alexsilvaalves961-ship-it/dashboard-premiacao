@@ -2606,21 +2606,108 @@ with tabs[0]:
             st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(evdf,"⚠️ Eventos dos Pilares",_int,"#D66D00",2.0),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
 with tabs[1]:
-    if is_admin:
-        st.subheader("Resumo de Premiações")
-        st.dataframe(res_view,use_container_width=True,hide_index=True)
+    st.subheader("📊 Resumo de Abastecimentos")
+    st.caption(
+        f"Visão consolidada dos abastecimentos da competência "
+        f"{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}, "
+        "respeitando os filtros e a filial autorizada do usuário."
+    )
+
+    ab_km = 0.0
+    ab_litros = 0.0
+    ab_gasto = 0.0
+    ab_qtd = 0
+    if det_view is not None and not det_view.empty:
+        if "KM_RODADO_EVENTO" in det_view.columns:
+            ab_km = float(pd.to_numeric(det_view["KM_RODADO_EVENTO"], errors="coerce").fillna(0).sum())
+        elif "KM_CONSUMO" in det_view.columns:
+            ab_km = float(pd.to_numeric(det_view["KM_CONSUMO"], errors="coerce").fillna(0).sum())
+        if "QTDE_NUM" in det_view.columns:
+            ab_litros = float(pd.to_numeric(det_view["QTDE_NUM"], errors="coerce").fillna(0).sum())
+        elif "LITROS_CONSUMO" in det_view.columns:
+            ab_litros = float(pd.to_numeric(det_view["LITROS_CONSUMO"], errors="coerce").fillna(0).sum())
+        if "VALOR_NUM" in det_view.columns:
+            ab_gasto = float(pd.to_numeric(det_view["VALOR_NUM"], errors="coerce").fillna(0).sum())
+        ab_qtd = len(det_view)
+
+    ab_media = (ab_km / ab_litros) if ab_litros > 0 else 0.0
+
+    def _fmt_brl(v):
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _fmt_num(v, dec=1):
+        return f"{float(v):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("⛽ Abastecimentos", f"{ab_qtd:,}".replace(",", "."))
+    a2.metric("💰 Gasto com Combustível", _fmt_brl(ab_gasto))
+    a3.metric("📍 KM", f"{_fmt_num(ab_km,1)} km")
+    a4.metric("🧪 Litros", f"{_fmt_num(ab_litros,1)} L")
+    a5.metric("🎯 Média", f"{_fmt_num(ab_media,2)} km/L")
+
+    if det_view is not None and not det_view.empty:
+        resumo_abast = det_view.copy()
+        nome_col = "CONDUTOR_NORMALIZADO" if "CONDUTOR_NORMALIZADO" in resumo_abast.columns else None
+        if nome_col:
+            resumo_abast["MOTORISTA"] = resumo_abast[nome_col].astype(str)
+        else:
+            resumo_abast["MOTORISTA"] = "SEM MOTORISTA"
+
+        km_col = "KM_RODADO_EVENTO" if "KM_RODADO_EVENTO" in resumo_abast.columns else ("KM_CONSUMO" if "KM_CONSUMO" in resumo_abast.columns else None)
+        litros_col = "QTDE_NUM" if "QTDE_NUM" in resumo_abast.columns else ("LITROS_CONSUMO" if "LITROS_CONSUMO" in resumo_abast.columns else None)
+        valor_col = "VALOR_NUM" if "VALOR_NUM" in resumo_abast.columns else None
+
+        agg_kwargs = {"ABASTECIMENTOS": ("MOTORISTA", "size")}
+        if km_col:
+            agg_kwargs["KM"] = (km_col, "sum")
+        if litros_col:
+            agg_kwargs["LITROS"] = (litros_col, "sum")
+        if valor_col:
+            agg_kwargs["GASTO"] = (valor_col, "sum")
+
+        resumo_motorista = resumo_abast.groupby("MOTORISTA", as_index=False).agg(**agg_kwargs)
+        if "KM" in resumo_motorista.columns and "LITROS" in resumo_motorista.columns:
+            resumo_motorista["MÉDIA KM/L"] = (
+                pd.to_numeric(resumo_motorista["KM"], errors="coerce").fillna(0) /
+                pd.to_numeric(resumo_motorista["LITROS"], errors="coerce").replace(0, pd.NA)
+            ).fillna(0)
+        else:
+            resumo_motorista["MÉDIA KM/L"] = 0.0
+
+        sort_col = "GASTO" if "GASTO" in resumo_motorista.columns else "ABASTECIMENTOS"
+        resumo_motorista = resumo_motorista.sort_values(sort_col, ascending=False)
+
+        if "GASTO" in resumo_motorista.columns:
+            resumo_motorista["GASTO"] = resumo_motorista["GASTO"].map(_fmt_brl)
+        if "KM" in resumo_motorista.columns:
+            resumo_motorista["KM"] = resumo_motorista["KM"].map(lambda x: f"{_fmt_num(x,1)} km")
+        if "LITROS" in resumo_motorista.columns:
+            resumo_motorista["LITROS"] = resumo_motorista["LITROS"].map(lambda x: f"{_fmt_num(x,1)} L")
+        resumo_motorista["MÉDIA KM/L"] = resumo_motorista["MÉDIA KM/L"].map(lambda x: _fmt_num(x,2))
+
+        st.markdown("#### 👥 Resumo por Motorista")
+        st.dataframe(resumo_motorista, use_container_width=True, hide_index=True)
+
+        st.markdown("#### ⛽ Últimos abastecimentos do período")
+        colunas_abast = [c for c in ["DATA_FILTRO", "CONDUTOR_NORMALIZADO", "PLACA_PADRONIZADA", "TIPO", "KM_ATUAL_NUM", "QTDE_NUM", "VALOR_NUM"] if c in resumo_abast.columns]
+        sort_cols = [c for c in ["DATA_FILTRO", "_ORDEM_ORIGINAL"] if c in resumo_abast.columns]
+        ultimos = resumo_abast.sort_values(sort_cols, ascending=True) if sort_cols else resumo_abast.copy()
+        if colunas_abast:
+            exib = ultimos[colunas_abast].tail(20).copy().rename(columns={
+                "DATA_FILTRO":"DATA", "CONDUTOR_NORMALIZADO":"MOTORISTA", "PLACA_PADRONIZADA":"PLACA",
+                "TIPO":"CATEGORIA", "KM_ATUAL_NUM":"KM", "QTDE_NUM":"LITROS", "VALOR_NUM":"VALOR"
+            })
+            if "DATA" in exib.columns:
+                exib["DATA"] = exib["DATA"].apply(lambda x: x.strftime("%d/%m/%Y") if hasattr(x, "strftime") else str(x))
+            if "KM" in exib.columns:
+                exib["KM"] = pd.to_numeric(exib["KM"], errors="coerce").fillna(0).map(lambda x: _fmt_num(x,1))
+            if "LITROS" in exib.columns:
+                exib["LITROS"] = pd.to_numeric(exib["LITROS"], errors="coerce").fillna(0).map(lambda x: _fmt_num(x,1))
+            if "VALOR" in exib.columns:
+                exib["VALOR"] = pd.to_numeric(exib["VALOR"], errors="coerce").fillna(0).map(_fmt_brl)
+            st.dataframe(exib, use_container_width=True, hide_index=True)
     else:
-        st.subheader("Gestão de Cadastros — somente consulta")
-        st.info("Seu perfil tem acesso somente para consulta. Alterações de motoristas, placas, datas e códigos funcionais estão disponíveis apenas para Administradores.")
-        cadastro_exib = cadastro.copy()
-        if "STATUS" in cadastro_exib.columns:
-            cadastro_exib["STATUS"] = cadastro_exib["STATUS"].replace({"ATIVO": "🟢 ATIVO", "INATIVO": "🔴 INATIVO"})
-        st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
-        st.markdown("##### 🚚 Placas cadastradas")
-        frota_exib = frota.copy()
-        if "STATUS" in frota_exib.columns:
-            frota_exib["STATUS"] = frota_exib["STATUS"].replace({"ATIVO": "🟢 ATIVA", "INATIVO": "🔴 INATIVA"})
-        st.dataframe(frota_exib, use_container_width=True, hide_index=True)
+        st.info("Nenhum abastecimento encontrado para os filtros e a competência selecionada.")
 with tabs[5]:
     st.subheader("Gestão de Cadastros")
     if not is_admin:
