@@ -2857,7 +2857,7 @@ with tabs[5]:
                     placeholder="Ex.: 12345",
                 )
 
-            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
+            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin), use_container_width=True):
                 salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
                 salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
