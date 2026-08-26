@@ -2355,8 +2355,28 @@ section[data-testid="stSidebar"] input{background:#F8FBFF!important;color:#11182
 </style>
 """, unsafe_allow_html=True)
 
+def _mtime_arquivo(nome):
+    try:
+        return os.path.getmtime(nome)
+    except Exception:
+        return 0.0
+
+# O cache do Streamlit agora depende do horário de alteração dos arquivos-base.
+# Assim, quando a planilha receber novos abastecimentos (inclusive 25/08),
+# a aplicação recarrega automaticamente sem ficar presa à versão antiga da base.
+_CACHE_BASE_TOKEN = (
+    _mtime_arquivo("Pasta2.xlsx"),
+    _mtime_arquivo("frota.xlsx"),
+    _mtime_arquivo("Pasta4.xlsx"),
+    _mtime_arquivo("uah_abastecimentos_3.xlsx"),
+    _mtime_arquivo("Pasta2.XLSX"),
+    _mtime_arquivo("frota.XLSX"),
+    _mtime_arquivo("Pasta4.XLSX"),
+    _mtime_arquivo("uah_abastecimentos_3.XLSX"),
+)
+
 @st.cache_resource(show_spinner=False)
-def carregar_base():
+def carregar_base(cache_token=None):
     config = AppConfig(); config.verificar_arquivos()
     loader = DataLoader(config); engine = RewardEngine()
     precos = loader.carregar_precos()
@@ -2366,7 +2386,7 @@ def carregar_base():
     eventos = engine.calcular_eventos_consumo(abastecimentos)
     return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
 
-config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base()
+config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
 cadastro_all = cadastro.copy()
 
 # Restringe todo o aplicativo à filial vinculada ao usuário de consulta.
@@ -2857,7 +2877,7 @@ with tabs[5]:
                     placeholder="Ex.: 12345",
                 )
 
-            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin), use_container_width=True):
+            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
                 salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
                 salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
