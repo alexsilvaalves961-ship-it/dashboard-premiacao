@@ -1,4 +1,5 @@
 import os
+import base64
 import hmac
 import hashlib
 import re
@@ -2191,47 +2192,7 @@ def gerar_recibos_lote(
   else:
     lista_mots = [motorista_sel]
 
-  recibos_html = [f"""
-    <style>
-    /* Recibo renderizado diretamente no Streamlit; a impressão oculta o restante da página. */
-    @page {{ size: A4; margin: 10mm; }}
-    @media print {{
-        html, body {{ background: #FFFFFF !important; }}
-        body * {{ visibility: hidden !important; }}
-        .recibo-print-zone, .recibo-print-zone * {{ visibility: visible !important; }}
-        .recibo-print-zone {{
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            background: #FFFFFF !important;
-        }}
-        .no-print {{ display: none !important; }}
-        .recibo-card {{
-            box-shadow: none !important;
-            border: 1px solid #CBD5E1 !important;
-            page-break-after: always !important;
-            break-after: page !important;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-        }}
-        .recibo-card:last-child {{
-            page-break-after: auto !important;
-            break-after: auto !important;
-        }}
-    }}
-    </style>
-    <div class="no-print" style="background:#F8FAFC;border:1px solid #E2E8F0;padding:12px 20px;border-radius:8px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;">
-        <span style="font-size:14px;font-weight:bold;color:#1E293B;">
-            📄 Total de Recibos Prontos: <span style="color:#2563EB;">{len(lista_mots)}</span>
-        </span>
-        <button onclick="window.print(); return false;" style="background-color:#2563EB;color:#FFFFFF;border:none;padding:8px 18px;border-radius:6px;font-weight:bold;cursor:pointer;font-size:13px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-            🖨️ Imprimir Todos os Recibos ({len(lista_mots)})
-        </button>
-    </div>
-    """]
+  recibos_html = []
 
   cards_html = []
   for m_nome in lista_mots:
@@ -2249,14 +2210,42 @@ def gerar_recibos_lote(
         " Inativo).</div>"
     )
 
-  return textwrap.dedent(
-      "".join(recibos_html)
-      + "<div class='recibo-container' style='display: flex; flex-direction:"
-      " column; gap: 30px;'>"
-      + "".join(cards_html)
-      + "</div>"
-  ).strip()
-
+  cards = "".join(cards_html)
+  cards_b64 = base64.b64encode(cards.encode("utf-8")).decode("ascii")
+  controls_html = f"""
+    <div class="no-print" style="background:#F8FAFC;border:1px solid #CBD5E1;padding:12px 18px;border-radius:10px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
+      <div style="font-size:14px;font-weight:700;color:#17215C;">📄 {len(lista_mots)} recibo(s) pronto(s)</div>
+      <button id="printRecibosBtn" style="background:#17215C;color:#FFFFFF;border:0;padding:10px 18px;border-radius:8px;font-weight:800;cursor:pointer;font-size:13px;">🖨️ Imprimir recibo(s)</button>
+    </div>
+    <script>
+    (() => {{
+      const btn = document.getElementById('printRecibosBtn');
+      if (!btn) return;
+      const b64 = '{cards_b64}';
+      btn.addEventListener('click', () => {{
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const html = new TextDecoder('utf-8').decode(bytes);
+        const w = window.open('', '_blank', 'width=1000,height=800');
+        if (!w) {{
+          alert('O navegador bloqueou a janela de impressão. Libere os pop-ups para este site e tente novamente.');
+          return;
+        }}
+        w.document.open();
+        w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Recibos de Premiação</title><style>
+          @page {{ size:A4; margin:10mm; }}
+          * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+          html,body {{ margin:0; padding:0; background:#fff; color:#000; font-family:Arial,sans-serif; }}
+          .recibo-container {{ width:100%; }}
+          .recibo-card {{ break-after:page; page-break-after:always; box-shadow:none !important; margin:0 auto !important; }}
+          .recibo-card:last-child {{ break-after:auto; page-break-after:auto; }}
+        </style></head><body><div class="recibo-container">${{html}}</div><script>window.onload=()=>{{setTimeout(()=>window.print(),350);}}<\/script></body></html>`);
+        w.document.close();
+        w.focus();
+      }});
+    }})();
+    </script>
+  """
+  return controls_html + "<div class='recibo-container' style='display:flex;flex-direction:column;gap:30px;'>" + cards + "</div>"
 
 
 
@@ -3137,8 +3126,8 @@ with tabs[6]:
             res_f,
         )
     if st.session_state.get("recibos_html_gerados"):
-        recibos_render = textwrap.dedent(str(st.session_state["recibos_html_gerados"])).strip()
-        st.markdown(recibos_render, unsafe_allow_html=True)
+        recibos_render = str(st.session_state["recibos_html_gerados"])
+        st.components.v1.html(recibos_render, height=980, scrolling=True)
 with tabs[7]:
     if is_admin:
         st.subheader("Lançamento de Ausências")
