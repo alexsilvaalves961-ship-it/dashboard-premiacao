@@ -2793,6 +2793,71 @@ with tabs[1]:
             resumo_motorista["LITROS"] = resumo_motorista["LITROS"].map(lambda x: f"{_fmt_num(x,1)} L")
         resumo_motorista["MÉDIA KM/L"] = resumo_motorista["MÉDIA KM/L"].map(lambda x: _fmt_num(x,2))
 
+        # ------------------------------------------------------------
+        # Dados adicionais de premiação no Resumo
+        # Mantemos o resumo de abastecimentos e acrescentamos os mesmos
+        # indicadores usados no cálculo final do prêmio/RH.
+        # ------------------------------------------------------------
+        if res_f is not None and not res_f.empty and "MOTORISTA" in res_f.columns:
+            premio_res = res_f.copy()
+            premio_res["MOTORISTA"] = premio_res["MOTORISTA"].astype(str)
+
+            cols_premio = [
+                "MOTORISTA",
+                "MEDIA_CALCULADA",
+                "MEDIA_FAIXA",
+                "PREMIO",
+                "STATUS_PREMIO",
+                "PREMIO_BRUTO",
+                "DIAS_AUSENCIA",
+                "DIAS_EFETIVOS",
+                "MOTIVO_DESCLASSIFICACAO",
+            ]
+            cols_premio = [c for c in cols_premio if c in premio_res.columns]
+            premio_res = premio_res[cols_premio].drop_duplicates("MOTORISTA", keep="last")
+
+            resumo_motorista = resumo_motorista.merge(
+                premio_res, on="MOTORISTA", how="left"
+            )
+
+            # Formatação dos campos adicionais
+            if "MEDIA_CALCULADA" in resumo_motorista.columns:
+                resumo_motorista["MEDIA_CALCULADA"] = pd.to_numeric(
+                    resumo_motorista["MEDIA_CALCULADA"], errors="coerce"
+                ).map(lambda x: _fmt_num(x,2) if pd.notna(x) else "-")
+            if "MEDIA_FAIXA" in resumo_motorista.columns:
+                resumo_motorista["MEDIA_FAIXA"] = pd.to_numeric(
+                    resumo_motorista["MEDIA_FAIXA"], errors="coerce"
+                ).map(lambda x: _fmt_num(x,2) if pd.notna(x) else "-")
+            if "PREMIO" in resumo_motorista.columns:
+                resumo_motorista["PREMIO"] = pd.to_numeric(
+                    resumo_motorista["PREMIO"], errors="coerce"
+                ).fillna(0).map(_fmt_brl)
+            if "PREMIO_BRUTO" in resumo_motorista.columns:
+                resumo_motorista["PREMIO_BRUTO"] = pd.to_numeric(
+                    resumo_motorista["PREMIO_BRUTO"], errors="coerce"
+                ).fillna(0).map(_fmt_brl)
+            if "DIAS_AUSENCIA" in resumo_motorista.columns:
+                resumo_motorista["DIAS_AUSENCIA"] = pd.to_numeric(
+                    resumo_motorista["DIAS_AUSENCIA"], errors="coerce"
+                ).fillna(0).astype(int)
+            if "DIAS_EFETIVOS" in resumo_motorista.columns:
+                resumo_motorista["DIAS_EFETIVOS"] = pd.to_numeric(
+                    resumo_motorista["DIAS_EFETIVOS"], errors="coerce"
+                ).fillna(30).astype(int)
+            if "STATUS_PREMIO" in resumo_motorista.columns:
+                resumo_motorista["STATUS_PREMIO"] = resumo_motorista["STATUS_PREMIO"].fillna("")
+            if "MOTIVO_DESCLASSIFICACAO" in resumo_motorista.columns:
+                resumo_motorista["MOTIVO_DESCLASSIFICACAO"] = resumo_motorista["MOTIVO_DESCLASSIFICACAO"].fillna("")
+
+            # Ordem das colunas: abastecimento primeiro e, em seguida, prêmio.
+            ordem = [
+                "MOTORISTA", "ABASTECIMENTOS", "KM", "LITROS", "GASTO", "MÉDIA KM/L",
+                "MEDIA_CALCULADA", "MEDIA_FAIXA", "PREMIO", "STATUS_PREMIO",
+                "PREMIO_BRUTO", "DIAS_AUSENCIA", "DIAS_EFETIVOS", "MOTIVO_DESCLASSIFICACAO"
+            ]
+            resumo_motorista = resumo_motorista[[c for c in ordem if c in resumo_motorista.columns]]
+
         st.markdown("#### 👥 Resumo por Motorista")
         st.dataframe(resumo_motorista, use_container_width=True, hide_index=True)
 
