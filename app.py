@@ -1306,7 +1306,32 @@ class RewardEngine:
       if custom_legacy:
         grupo["CATEGORIA_MANUAL"] = grupo["CATEGORIA_MANUAL"].replace("", custom_legacy)
 
-      if eh_folguista and not custom_legacy and not grupo["CATEGORIA_MANUAL"].astype(bool).any():
+      manual_mask = grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != ""
+      categorias_abastecimento = [
+          str(x).strip().upper()
+          for x in grupo.loc[grupo["CATEGORIA_ABASTECIMENTO"].notna(), "CATEGORIA_ABASTECIMENTO"]
+          if str(x).strip()
+      ]
+      categorias_unicas = sorted(set(categorias_abastecimento))
+
+      if manual_mask.any():
+        # Mapeamento manual por placa tem prioridade absoluta.
+        grupo["CATEGORIA_ELEGIVEL"] = np.where(
+            manual_mask,
+            grupo["CATEGORIA_MANUAL"],
+            grupo["CATEGORIA_MANUAL"].replace("", np.nan).ffill().bfill().fillna(
+                tipo_cad if tipo_cad else (categorias_unicas[0] if categorias_unicas else "TRUCK")
+            ),
+        )
+        grupo["USA_CATEGORIA_MANUAL"] = manual_mask
+      elif len(categorias_unicas) == 1:
+        # Quando todos os abastecimentos do motorista são de uma única categoria,
+        # usamos a categoria real da frota/abastecimento. Não deixamos o
+        # TIPO_CADASTRO sobrescrever a categoria efetivamente trabalhada.
+        grupo["CATEGORIA_ELEGIVEL"] = categorias_unicas[0]
+        grupo["USA_CATEGORIA_MANUAL"] = False
+      elif eh_folguista:
+        # Folguista sem mapeamento manual: usa a categoria em que rodou mais KM.
         soma = grupo.groupby("CATEGORIA_ABASTECIMENTO")["KM_CONSUMO"].sum()
         cat_elegivel = (
             soma.idxmax()
@@ -1316,14 +1341,10 @@ class RewardEngine:
         grupo["CATEGORIA_ELEGIVEL"] = cat_elegivel
         grupo["USA_CATEGORIA_MANUAL"] = False
       else:
-        grupo["CATEGORIA_ELEGIVEL"] = np.where(
-            grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != "",
-            grupo["CATEGORIA_MANUAL"],
-            tipo_cad if tipo_cad else grupo["CATEGORIA_ABASTECIMENTO"].iloc[0],
-        )
-        grupo["USA_CATEGORIA_MANUAL"] = (
-            grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != ""
-        )
+        # Para múltiplas categorias sem mapeamento manual, mantemos a categoria
+        # cadastral como fallback para não alterar a regra já existente.
+        grupo["CATEGORIA_ELEGIVEL"] = tipo_cad if tipo_cad else grupo["CATEGORIA_ABASTECIMENTO"].iloc[0]
+        grupo["USA_CATEGORIA_MANUAL"] = False
 
       registros.append(grupo)
 
@@ -2028,6 +2049,17 @@ def gerar_html_unico_recibo(
       .replace("X", ".")
   )
 
+  eventos_jornada = int(pd.to_numeric(row_data.get("EVENTOS_CONTROLE_JORNADA", 0), errors="coerce") or 0)
+  eventos_excesso = int(pd.to_numeric(row_data.get("EVENTOS_EXCESSO_VELOCIDADE", 0), errors="coerce") or 0)
+  desconto_jornada = float(pd.to_numeric(row_data.get("DESCONTO_CONTROLE_JORNADA", 0), errors="coerce") or 0)
+  desconto_excesso = float(pd.to_numeric(row_data.get("DESCONTO_EXCESSO_VELOCIDADE", 0), errors="coerce") or 0)
+  total_controles = eventos_jornada + eventos_excesso
+  valor_total_controles = desconto_jornada + desconto_excesso
+  percentual_controles = (100.0 if eventos_jornada >= 130 or eventos_excesso > 30 else 0.0)
+  valor_total_controles_str = (
+      f"R$ {valor_total_controles:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+  )
+
   motivo_descl = row_data.get(
       "MOTIVO_DESCLASSIFICACAO", "Elegível / Em conformidade"
   )
@@ -2086,11 +2118,11 @@ def gerar_html_unico_recibo(
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">JORNADA</td>
-                <td style="padding: 4px 8px; text-align: center;">0</td>
+                <td style="padding: 4px 8px; text-align: center;">{eventos_jornada}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">EXCESSO DE VELOCIDADE</td>
-                <td style="padding: 4px 8px; text-align: center;">0</td>
+                <td style="padding: 4px 8px; text-align: center;">{eventos_excesso}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">KM RODADO</td>
@@ -2110,19 +2142,19 @@ def gerar_html_unico_recibo(
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">130</td>
+                <td style="padding: 4px 8px; text-align: center;">{total_controles}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR TOTAL CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+                <td style="padding: 4px 8px; text-align: center;">{valor_total_controles_str}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">% CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">100%</td>
+                <td style="padding: 4px 8px; text-align: center;">{percentual_controles:.0f}%</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">R$ CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+                <td style="padding: 4px 8px; text-align: center;">{valor_total_controles_str}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR MÉDIA</td>
@@ -2196,8 +2228,14 @@ def gerar_recibos_lote(
 
   cards_html = []
   for m_nome in lista_mots:
-    row = res_f[res_f["MOTORISTA"] == m_nome]
+    row = res_f[res_f["MOTORISTA"] == m_nome].copy()
     if not row.empty:
+      # O recibo usa o resultado final consolidado do motorista.
+      # Se houver duplicidade residual, prioriza o registro com maior prêmio e
+      # status final de cálculo, evitando pegar uma linha intermediária.
+      if "PREMIO" in row.columns:
+        row["_PREMIO_NUM"] = pd.to_numeric(row["PREMIO"], errors="coerce").fillna(0.0)
+        row = row.sort_values(["_PREMIO_NUM"], ascending=False)
       card_html = gerar_html_unico_recibo(
           row.iloc[0], m_nome, periodo_ini, periodo_fim, fator_c
       )
