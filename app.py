@@ -2733,7 +2733,7 @@ with tabs[5]:
                     placeholder="Ex.: 12345",
                 )
 
-            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin), use_container_width=True):
+            if st.button("💾 Salvar Dados do Motorista", key="btn_salvar_datas_mot", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
                 salvar_data_contratacao_motorista(mot_escolhido, data_contratacao_edit)
                 salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
@@ -2818,9 +2818,17 @@ with tabs[4]:
         st.subheader("Categoria considerada para pagamento")
         st.caption("Defina a categoria de pagamento por motorista + placa. Os registros abaixo podem ser editados ou excluídos individualmente.")
 
-        mot_opts=sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else []
+        # Restrição por filial: usuários de consulta só enxergam motoristas da filial autorizada.
+        if is_admin:
+            mot_opts=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
+            eventos_cat = eventos.copy()
+        else:
+            mot_opts=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
+            permitidos_norm={DataUtils.normalizar_texto(x) for x in mot_opts}
+            eventos_cat=eventos[eventos["CONDUTOR_NORMALIZADO"].isin(permitidos_norm)].copy()
         sm=st.selectbox("Motorista",mot_opts,key="cat_mot_new") if mot_opts else ""
-        plate_opts=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==sm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm else []
+        sm_norm=DataUtils.normalizar_texto(sm) if sm else ""
+        plate_opts=sorted(eventos_cat.loc[eventos_cat["CONDUTOR_NORMALIZADO"]==sm_norm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm_norm else []
         sp=st.selectbox("Placa",plate_opts,key="cat_plate_new") if plate_opts else ""
         sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()),key="cat_cat_new")
         if st.button("💾 Salvar categoria",key="savecat", disabled=(not is_admin)) and sm and sp:
@@ -2848,13 +2856,17 @@ with tabs[4]:
                 f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']}"
                 for i, row in df_cat_custom.reset_index(drop=True).iterrows()
             ]
+            opcoes_cat_display = opcoes_cat if opcoes_cat else ["Nenhum registro disponível para a filial autorizada"]
             selecionado_cat = st.selectbox(
                 "Selecionar registro",
-                opcoes_cat,
+                opcoes_cat_display,
                 key="cat_registro_sel",
+                disabled=(not opcoes_cat),
             )
-            idx_cat = int(selecionado_cat.split("]", 1)[0].replace("[", ""))
-            reg_cat = df_cat_custom.iloc[idx_cat]
+            reg_cat = None
+            if opcoes_cat:
+                idx_cat = int(selecionado_cat.split("]", 1)[0].replace("[", ""))
+                reg_cat = df_cat_custom.iloc[idx_cat]
 
             ec1, ec2, ec3 = st.columns([2.2, 1.3, 1.5])
             with ec1:
@@ -2885,7 +2897,7 @@ with tabs[4]:
 
             ac1, ac2 = st.columns(2)
             with ac1:
-                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin), use_container_width=True):
+                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin or not opcoes_cat), use_container_width=True):
                     chave_antiga = reg_cat["_CHAVE"]
                     chave_nova = normalizar_chave_categoria_customizada(mot_edit, placa_edit)
                     novo_mapa = dict(st.session_state.mapa_cat_custom)
@@ -2917,6 +2929,7 @@ with tabs[4]:
         st.info("Seu perfil tem acesso somente para consulta. Edição e exclusão de categorias são exclusivas do Administrador.")
         mapa_atual = st.session_state.mapa_cat_custom or {}
         if mapa_atual:
+            permitidos_norm={DataUtils.normalizar_texto(x) for x in cadastro["MOTORISTA_CADASTRO"].dropna().astype(str)}
             df_cat_view = pd.DataFrame([
                 {
                     "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
@@ -2924,8 +2937,12 @@ with tabs[4]:
                     "CATEGORIA": str(valor),
                 }
                 for chave, valor in mapa_atual.items()
+                if is_admin or DataUtils.normalizar_texto((str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave))) in permitidos_norm
             ])
-            st.dataframe(df_cat_view, use_container_width=True, hide_index=True)
+            if df_cat_view.empty:
+                st.info("Nenhum mapeamento manual de categoria disponível para a filial autorizada.")
+            else:
+                st.dataframe(df_cat_view, use_container_width=True, hide_index=True)
         else:
             st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
 with tabs[11]:
