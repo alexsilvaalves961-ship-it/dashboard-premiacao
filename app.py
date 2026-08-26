@@ -2613,19 +2613,32 @@ with tabs[1]:
         "respeitando os filtros e a filial autorizada do usuário."
     )
 
+    # Para KM/Média usamos os eventos de consumo calculados sobre a base completa.
+    # Assim, o primeiro abastecimento da competência ainda consegue usar o KM anterior
+    # da mesma placa, mesmo que esse abastecimento anterior esteja fora da competência.
+    evt_resumo = eventos.copy() if eventos is not None else pd.DataFrame()
+    if not evt_resumo.empty:
+        evt_resumo = aplicar_periodo(evt_resumo) if 'aplicar_periodo' in globals() else evt_resumo
+
     ab_km = 0.0
     ab_litros = 0.0
     ab_gasto = 0.0
     ab_qtd = 0
+
+    if not evt_resumo.empty:
+        evt_validos = evt_resumo[evt_resumo.get("REGISTRO_CONSUMO_VALIDO", False)].copy() if "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns else evt_resumo.copy()
+        if "KM_CONSUMO" in evt_validos.columns:
+            ab_km = float(pd.to_numeric(evt_validos["KM_CONSUMO"], errors="coerce").fillna(0).sum())
+        if "LITROS_CONSUMO" in evt_validos.columns:
+            ab_litros = float(pd.to_numeric(evt_validos["LITROS_CONSUMO"], errors="coerce").fillna(0).sum())
+        elif "QTDE_NUM" in evt_validos.columns:
+            ab_litros = float(pd.to_numeric(evt_validos["QTDE_NUM"], errors="coerce").fillna(0).sum())
+        ab_qtd = len(det_view) if det_view is not None else 0
+
+    # Gasto e quantidade de abastecimentos continuam vindo do detalhamento bruto.
     if det_view is not None and not det_view.empty:
-        if "KM_RODADO_EVENTO" in det_view.columns:
-            ab_km = float(pd.to_numeric(det_view["KM_RODADO_EVENTO"], errors="coerce").fillna(0).sum())
-        elif "KM_CONSUMO" in det_view.columns:
-            ab_km = float(pd.to_numeric(det_view["KM_CONSUMO"], errors="coerce").fillna(0).sum())
-        if "QTDE_NUM" in det_view.columns:
+        if "QTDE_NUM" in det_view.columns and ab_litros <= 0:
             ab_litros = float(pd.to_numeric(det_view["QTDE_NUM"], errors="coerce").fillna(0).sum())
-        elif "LITROS_CONSUMO" in det_view.columns:
-            ab_litros = float(pd.to_numeric(det_view["LITROS_CONSUMO"], errors="coerce").fillna(0).sum())
         if "VALOR_NUM" in det_view.columns:
             ab_gasto = float(pd.to_numeric(det_view["VALOR_NUM"], errors="coerce").fillna(0).sum())
         ab_qtd = len(det_view)
@@ -2653,19 +2666,22 @@ with tabs[1]:
         else:
             resumo_abast["MOTORISTA"] = "SEM MOTORISTA"
 
-        km_col = "KM_RODADO_EVENTO" if "KM_RODADO_EVENTO" in resumo_abast.columns else ("KM_CONSUMO" if "KM_CONSUMO" in resumo_abast.columns else None)
-        litros_col = "QTDE_NUM" if "QTDE_NUM" in resumo_abast.columns else ("LITROS_CONSUMO" if "LITROS_CONSUMO" in resumo_abast.columns else None)
-        valor_col = "VALOR_NUM" if "VALOR_NUM" in resumo_abast.columns else None
+        # KM/L por motorista deve usar o evento de consumo calculado na base completa.
+        evt_mot = evt_resumo[evt_resumo.get("REGISTRO_CONSUMO_VALIDO", False)].copy() if (not evt_resumo.empty and "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns) else evt_resumo.copy()
+        if not evt_mot.empty:
+            evt_mot["MOTORISTA"] = evt_mot["CONDUTOR_NORMALIZADO"].astype(str)
+            km_agg = evt_mot.groupby("MOTORISTA", as_index=False).agg(KM=("KM_CONSUMO", "sum"), LITROS=("LITROS_CONSUMO", "sum"))
+        else:
+            km_agg = pd.DataFrame(columns=["MOTORISTA", "KM", "LITROS"])
 
-        agg_kwargs = {"ABASTECIMENTOS": ("MOTORISTA", "size")}
-        if km_col:
-            agg_kwargs["KM"] = (km_col, "sum")
-        if litros_col:
-            agg_kwargs["LITROS"] = (litros_col, "sum")
-        if valor_col:
-            agg_kwargs["GASTO"] = (valor_col, "sum")
-
-        resumo_motorista = resumo_abast.groupby("MOTORISTA", as_index=False).agg(**agg_kwargs)
+        resumo_motorista = resumo_abast.groupby("MOTORISTA", as_index=False).agg(ABASTECIMENTOS=("MOTORISTA", "size"))
+        if not km_agg.empty:
+            gasto_mot = resumo_abast.groupby("MOTORISTA", as_index=False)["VALOR_NUM"].sum().rename(columns={"VALOR_NUM":"GASTO"}) if "VALOR_NUM" in resumo_abast.columns else pd.DataFrame(columns=["MOTORISTA","GASTO"])
+            resumo_motorista = resumo_motorista.merge(km_agg, on="MOTORISTA", how="left").merge(gasto_mot, on="MOTORISTA", how="left")
+        else:
+            resumo_motorista["KM"] = 0.0
+            resumo_motorista["LITROS"] = 0.0
+            resumo_motorista["GASTO"] = 0.0
         if "KM" in resumo_motorista.columns and "LITROS" in resumo_motorista.columns:
             resumo_motorista["MÉDIA KM/L"] = (
                 pd.to_numeric(resumo_motorista["KM"], errors="coerce").fillna(0) /
