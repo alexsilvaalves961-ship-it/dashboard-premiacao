@@ -2613,35 +2613,44 @@ with tabs[1]:
         "respeitando os filtros e a filial autorizada do usuário."
     )
 
-    # Para KM/Média usamos os eventos de consumo calculados sobre a base completa.
-    # Assim, o primeiro abastecimento da competência ainda consegue usar o KM anterior
-    # da mesma placa, mesmo que esse abastecimento anterior esteja fora da competência.
+    # KM/Média: usamos os eventos calculados na base COMPLETA, mas restringimos
+    # exatamente aos abastecimentos que aparecem em det_view (já filtrados por
+    # competência + usuário/filial + motorista + placa + categoria).
+    # Assim o KM_ANTERIOR continua vindo do histórico da placa, sem misturar
+    # outras filiais/motoristas com o resumo atual.
     evt_resumo = eventos.copy() if eventos is not None else pd.DataFrame()
-    if not evt_resumo.empty:
-        evt_resumo = aplicar_periodo(evt_resumo) if 'aplicar_periodo' in globals() else evt_resumo
+    if not evt_resumo.empty and det_view is not None and not det_view.empty:
+        if "_ORDEM_ORIGINAL" in evt_resumo.columns and "_ORDEM_ORIGINAL" in det_view.columns:
+            ids_periodo = set(pd.to_numeric(det_view["_ORDEM_ORIGINAL"], errors="coerce").dropna().astype(int).tolist())
+            evt_resumo = evt_resumo[
+                pd.to_numeric(evt_resumo["_ORDEM_ORIGINAL"], errors="coerce").isin(ids_periodo)
+            ].copy()
+        else:
+            # Fallback para bases antigas sem o identificador original.
+            evt_resumo = aplicar_periodo(evt_resumo) if 'aplicar_periodo' in globals() else evt_resumo
 
     ab_km = 0.0
     ab_litros = 0.0
     ab_gasto = 0.0
-    ab_qtd = 0
+    ab_qtd = len(det_view) if det_view is not None else 0
 
     if not evt_resumo.empty:
-        evt_validos = evt_resumo[evt_resumo.get("REGISTRO_CONSUMO_VALIDO", False)].copy() if "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns else evt_resumo.copy()
+        evt_validos = (
+            evt_resumo[evt_resumo["REGISTRO_CONSUMO_VALIDO"]].copy()
+            if "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns
+            else evt_resumo.copy()
+        )
         if "KM_CONSUMO" in evt_validos.columns:
             ab_km = float(pd.to_numeric(evt_validos["KM_CONSUMO"], errors="coerce").fillna(0).sum())
-        if "LITROS_CONSUMO" in evt_validos.columns:
-            ab_litros = float(pd.to_numeric(evt_validos["LITROS_CONSUMO"], errors="coerce").fillna(0).sum())
-        elif "QTDE_NUM" in evt_validos.columns:
-            ab_litros = float(pd.to_numeric(evt_validos["QTDE_NUM"], errors="coerce").fillna(0).sum())
-        ab_qtd = len(det_view) if det_view is not None else 0
 
-    # Gasto e quantidade de abastecimentos continuam vindo do detalhamento bruto.
+    # Litros e gasto são os abastecimentos efetivamente exibidos no resumo.
+    # Não usamos a soma de todos os eventos da base, para não misturar outras
+    # filiais/motoristas.
     if det_view is not None and not det_view.empty:
-        if "QTDE_NUM" in det_view.columns and ab_litros <= 0:
+        if "QTDE_NUM" in det_view.columns:
             ab_litros = float(pd.to_numeric(det_view["QTDE_NUM"], errors="coerce").fillna(0).sum())
         if "VALOR_NUM" in det_view.columns:
             ab_gasto = float(pd.to_numeric(det_view["VALOR_NUM"], errors="coerce").fillna(0).sum())
-        ab_qtd = len(det_view)
 
     ab_media = (ab_km / ab_litros) if ab_litros > 0 else 0.0
 
@@ -2666,11 +2675,23 @@ with tabs[1]:
         else:
             resumo_abast["MOTORISTA"] = "SEM MOTORISTA"
 
-        # KM/L por motorista deve usar o evento de consumo calculado na base completa.
-        evt_mot = evt_resumo[evt_resumo.get("REGISTRO_CONSUMO_VALIDO", False)].copy() if (not evt_resumo.empty and "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns) else evt_resumo.copy()
+        # KM/L por motorista usa somente os eventos selecionados acima.
+        evt_mot = (
+            evt_resumo[evt_resumo["REGISTRO_CONSUMO_VALIDO"]].copy()
+            if (not evt_resumo.empty and "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns)
+            else evt_resumo.copy()
+        )
         if not evt_mot.empty:
             evt_mot["MOTORISTA"] = evt_mot["CONDUTOR_NORMALIZADO"].astype(str)
-            km_agg = evt_mot.groupby("MOTORISTA", as_index=False).agg(KM=("KM_CONSUMO", "sum"), LITROS=("LITROS_CONSUMO", "sum"))
+            km_agg = evt_mot.groupby("MOTORISTA", as_index=False).agg(
+                KM=("KM_CONSUMO", "sum"),
+                LITROS_VALIDOS=("LITROS_CONSUMO", "sum"),
+            )
+            # Para o resumo, os litros do motorista devem refletir todos os
+            # abastecimentos exibidos, mesmo quando o primeiro abastecimento
+            # daquela placa não pode gerar KM de consumo.
+            litros_det = resumo_abast.groupby("MOTORISTA", as_index=False)["QTDE_NUM"].sum().rename(columns={"QTDE_NUM": "LITROS"})
+            km_agg = km_agg.drop(columns=["LITROS_VALIDOS"], errors="ignore").merge(litros_det, on="MOTORISTA", how="outer")
         else:
             km_agg = pd.DataFrame(columns=["MOTORISTA", "KM", "LITROS"])
 
