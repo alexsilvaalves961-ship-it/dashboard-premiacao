@@ -2413,11 +2413,13 @@ def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
 
 
 def _motoristas_filial(df):
+    """Restringe registros de eventos/cadastros à filial do usuário logado."""
     if df is None or df.empty or is_admin or FILIAL_ACESSO in ("", "TODAS"):
         return df
-    tmp=df.copy(); nomes=set(cadastro["MOTORISTA_CADASTRO"].astype(str))
+    tmp = df.copy()
+    nomes = {DataUtils.normalizar_texto(x) for x in cadastro["MOTORISTA_CADASTRO"].dropna().astype(str)}
     if "MOTORISTA" in tmp.columns:
-        return tmp[tmp["MOTORISTA"].astype(str).isin(nomes)].copy()
+        return tmp[tmp["MOTORISTA"].fillna("").apply(DataUtils.normalizar_texto).isin(nomes)].copy()
     return tmp
 
 def ausencia_label(i, row):
@@ -2496,11 +2498,6 @@ with st.sidebar:
         help="Ex.: Competência 08/2026 = 26/07/2026 a 25/08/2026."
     )
     dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
-
-    st.info(
-        "As férias e demais afastamentos são rateados automaticamente entre as competências 26→25. "
-        "Ex.: 04/08→02/09 = 22 dias na competência 26/07→25/08 e 8 dias na competência 26/08→25/09."
-    )
 
     st.markdown(
         f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
@@ -2968,7 +2965,7 @@ with tabs[7]:
     else:
         st.subheader("Ausências — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
-        st.dataframe(st.session_state.ausencias, use_container_width=True, hide_index=True)
+        st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
 with tabs[10]:
     if is_admin:
         st.subheader("Gestão de Desclassificações (Pilar 1)")
@@ -2986,7 +2983,7 @@ with tabs[10]:
     else:
         st.subheader("Desclassificações — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de desclassificações são exclusivos do Administrador.")
-        st.dataframe(st.session_state.desclassificacoes, use_container_width=True, hide_index=True)
+        st.dataframe(_motoristas_filial(st.session_state.desclassificacoes), use_container_width=True, hide_index=True)
 if is_admin:
     with tabs[12]:
         st.subheader("🔐 Gestão de Usuários")
