@@ -2110,77 +2110,69 @@ def aplicar_regras_gerais(
 # ================================================================
 # GERADOR DE DATAFRAME EXCLUSIVO DO RH
 # ================================================================
-def gerar_tabela_rh(df_resumo: pd.DataFrame, cadastro_fonte: Optional[pd.DataFrame] = None, filial_filtro: str = "TODAS") -> pd.DataFrame:
-  """Monta o RH a partir de TODOS os motoristas ATIVOS do cadastro oficial.
+def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
+  """Monta o RH usando a FILIAL FIXA do cadastro e o prêmio final calculado.
 
-  O relatório RH não depende de abastecimento, média ou existência de prêmio.
-  Se o motorista estiver ativo no cadastro e não possuir cálculo na competência,
-  ele aparece normalmente com R$ 0,00.
+  A filial do motorista é cadastral e não deve variar conforme placa, categoria ou
+  abastecimento. Placas/categorias podem variar, mas a base do colaborador é sempre
+  a que está registrada em `cadastro`.
   """
-  colunas_saida = ["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO"]
-  cad = cadastro_fonte.copy() if isinstance(cadastro_fonte, pd.DataFrame) else (cadastro_all.copy() if "cadastro_all" in globals() else cadastro.copy())
-  if cad is None or cad.empty or "MOTORISTA_CADASTRO" not in cad.columns:
-    return pd.DataFrame(columns=colunas_saida)
+  if df_resumo.empty or "MOTORISTA" not in df_resumo.columns:
+    return pd.DataFrame(columns=["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO"])
 
-  # O RH deve listar todos os ATIVOS, independentemente de férias, atestado,
-  # falta de abastecimento ou ausência de cálculo de consumo.
-  if "STATUS" in cad.columns:
-    cad = cad[cad["STATUS"].fillna("ATIVO").astype(str).str.strip().str.upper().eq("ATIVO")].copy()
+  if "STATUS_MOTORISTA" in df_resumo.columns:
+    df_rh = df_resumo[df_resumo["STATUS_MOTORISTA"] == "ATIVO"].copy()
+  else:
+    df_rh = df_resumo.copy()
 
-  # Respeita a filial autorizada do usuário/filial escolhida, mas nunca usa
-  # abastecimento ou placa para determinar a filial.
-  if filial_filtro and filial_filtro != "TODAS":
-    filial_norm = DataUtils.normalizar_texto(filial_filtro)
-    cad = cad[cad["BASE_CADASTRO"].fillna("").apply(DataUtils.normalizar_texto).eq(filial_norm)].copy()
-
-  cad["_MOTORISTA_RH"] = cad["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
-  cad = cad.drop_duplicates("_MOTORISTA_RH", keep="last").reset_index(drop=True)
-
-  # Resultado do cálculo da competência, se existir. Motoristas sem resultado
-  # recebem valores zerados, mas continuam no RH.
-  resultados = {}
-  if isinstance(df_resumo, pd.DataFrame) and not df_resumo.empty and "MOTORISTA" in df_resumo.columns:
-    temp = df_resumo.copy()
-    temp["_MOTORISTA_RH"] = temp["MOTORISTA"].apply(DataUtils.normalizar_texto)
-    temp = temp.drop_duplicates("_MOTORISTA_RH", keep="last")
-    resultados = {r["_MOTORISTA_RH"]: r for _, r in temp.iterrows()}
+  # CÓDIGO FUNCIONAL e FILIAL: fonte oficial = Gestão de Cadastros.
+  # Mantém um fallback no arquivo histórico de códigos apenas para não apagar
+  # um código já existente durante a transição.
+  filial_por_motorista = {}
+  codigo_por_motorista = {}
+  try:
+    cad_rh = cadastro_all.copy() if "cadastro_all" in globals() else cadastro.copy()
+    if not cad_rh.empty:
+      cad_rh["_MOTORISTA_RH"] = cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
+      cad_rh["_FILIAL_RH"] = cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto)
+      if "CODIGO_FUNCIONAL" in cad_rh.columns:
+        cad_rh["_CODIGO_RH"] = cad_rh["CODIGO_FUNCIONAL"].fillna("").astype(str).str.strip()
+      else:
+        cad_rh["_CODIGO_RH"] = ""
+      cad_rh = cad_rh.drop_duplicates("_MOTORISTA_RH", keep="last")
+      filial_por_motorista = dict(zip(cad_rh["_MOTORISTA_RH"], cad_rh["_FILIAL_RH"]))
+      codigo_por_motorista = dict(zip(cad_rh["_MOTORISTA_RH"], cad_rh["_CODIGO_RH"]))
+  except Exception:
+    filial_por_motorista = {}
+    codigo_por_motorista = {}
 
   codigos_fallback = carregar_codigos_funcionais()
-  linhas = []
-  for _, c in cad.iterrows():
-    chave = c["_MOTORISTA_RH"]
-    r = resultados.get(chave)
-    codigo = str(c.get("CODIGO_FUNCIONAL", "") or "").strip()
-    if not codigo:
-      codigo = str(codigos_fallback.get(chave, "") or "").strip()
-
-    filial = DataUtils.normalizar_texto(c.get("BASE_CADASTRO", ""))
-    premio = 0.0
-    if r is not None:
-      try:
-        premio = float(pd.to_numeric(r.get("PREMIO", 0), errors="coerce"))
-        if pd.isna(premio):
-          premio = 0.0
-      except Exception:
-        premio = 0.0
-
-    linhas.append({
-        "CÓDIGO FUNCIONAL": codigo,
-        "NOME": c.get("MOTORISTA_CADASTRO", ""),
-        "FILIAL": filial,
-        "VALOR PAGO": premio,
-    })
-
-  rh_df = pd.DataFrame(linhas, columns=colunas_saida)
+  df_rh["_MOTORISTA_RH"] = df_rh["MOTORISTA"].apply(DataUtils.normalizar_texto)
+  df_rh["FILIAL"] = df_rh["_MOTORISTA_RH"].map(filial_por_motorista).fillna("")
+  df_rh["CODIGO_FUNCIONAL"] = df_rh["_MOTORISTA_RH"].map(codigo_por_motorista)
+  df_rh["CODIGO_FUNCIONAL"] = df_rh["CODIGO_FUNCIONAL"].where(
+      df_rh["CODIGO_FUNCIONAL"].fillna("").astype(str).str.strip() != "",
+      df_rh["_MOTORISTA_RH"].map(codigos_fallback).fillna(""),
+  )
 
   def formatar_valor_pago(x):
+    if pd.isna(x):
+      return "R$ 0,00"
     try:
-      valor = float(x) if pd.notna(x) else 0.0
+      return (
+          f"R$ {float(x):,.2f}".replace(",", "X")
+          .replace(".", ",")
+          .replace("X", ".")
+      )
     except Exception:
-      valor = 0.0
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+      return "R$ 0,00"
 
-  rh_df["VALOR PAGO"] = rh_df["VALOR PAGO"].map(formatar_valor_pago)
+  rh_df = pd.DataFrame({
+      "CÓDIGO FUNCIONAL": df_rh.get("CODIGO_FUNCIONAL", ""),
+      "NOME": df_rh["MOTORISTA"],
+      "FILIAL": df_rh["FILIAL"],
+      "VALOR PAGO": df_rh["PREMIO"].map(formatar_valor_pago),
+  })
   return rh_df
 
 
@@ -2427,10 +2419,7 @@ def aplicar_filtros(
       errors="ignore",
   )
 
-  rh_filial_filtro = filial if (filial and filial != "TODAS") else "TODAS"
-  if not is_admin and FILIAL_ACESSO not in ("", "TODAS"):
-    rh_filial_filtro = FILIAL_ACESSO
-  rh_view = gerar_tabela_rh(res_f, cadastro_all if "cadastro_all" in globals() else cadastro, rh_filial_filtro)
+  rh_view = gerar_tabela_rh(res_f)
 
   f_premio = (
       f"R$ {tot_premio:,.2f}".replace(",", "X")
@@ -3594,24 +3583,8 @@ with tabs[5]:
                 st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
                 st.rerun()
 
-    st.markdown("##### 👥 Motoristas cadastrados")
-if is_admin and _migracao_cadastro_count:
-    st.caption(f"Cadastro oficial ativo: {_migracao_cadastro_count} registros persistidos na Gestão de Cadastros.")
-    colunas_cad = [c for c in [
-        "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO", "BASE_CADASTRO",
-        "EH_FOLGUISTA", "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
-    ] if c in cadastro_exib.columns]
-    cadastro_exib = cadastro_exib[colunas_cad]
-    st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
-
-    frota_exib = frota.copy()
-    if "STATUS" in frota_exib.columns:
-        frota_exib["STATUS"] = frota_exib["STATUS"].replace({
-            "ATIVO": "🟢 ATIVA",
-            "INATIVO": "🔴 INATIVA",
-        })
-    st.markdown("##### 🚚 Placas cadastradas")
-    st.dataframe(frota_exib, use_container_width=True, hide_index=True)
+    # As tabelas completas de Motoristas e Placas não são exibidas nesta aba.
+    # O cadastro continua sendo usado internamente como fonte oficial do sistema.
 
 with tabs[3]:
     st.subheader("Média separada por placa")
@@ -3699,8 +3672,7 @@ with tabs[11]:
     st.subheader("Relatório RH")
     st.caption("Relatório de pagamento: considera o prêmio final apurado para cada motorista na competência selecionada, após todas as regras e descontos. Não é um demonstrativo de abastecimentos.")
     st.caption("Valores zerados são destacados em vermelho.")
-    st.caption(f"Motoristas ativos no cadastro oficial: {len(cadastro_all[cadastro_all["STATUS"].fillna("ATIVO").astype(str).str.upper().eq("ATIVO")]) if isinstance(cadastro_all, pd.DataFrame) and "STATUS" in cadastro_all.columns else len(cadastro_all)}")
-st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
+    st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
 with tabs[2]:
     st.subheader("Detalhamento dos Abastecimentos")
     st.caption("O motorista considerado no cálculo é validado pelo histórico de viagens quando existe correspondência segura por placa, KM e data/hora.")
