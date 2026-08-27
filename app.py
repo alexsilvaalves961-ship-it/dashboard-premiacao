@@ -1876,6 +1876,59 @@ def _dias_ausencia_por_competencia(
     return acumulado
 
 
+def filtrar_ausencias_competencia(df_ausencias: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
+  """Mostra somente afastamentos que intersectam a competência 26-25.
+
+  O dia inicial e o dia final são inclusivos. Um afastamento que termina exatamente
+  no último dia da competência pertence àquela competência e não aparece na seguinte.
+  Para períodos que atravessam competências, a coluna DIAS_COMPETENCIA mostra apenas
+  os dias que caem na competência selecionada.
+  """
+  if df_ausencias is None or df_ausencias.empty:
+    return pd.DataFrame() if df_ausencias is None else df_ausencias.copy()
+  if data_inicio_comp is None or data_fim_comp is None:
+    return df_ausencias.copy()
+
+  ini_comp = parse_data_filtro(data_inicio_comp)
+  fim_comp = parse_data_filtro(data_fim_comp)
+  if ini_comp is None or fim_comp is None:
+    return df_ausencias.copy()
+  ini_comp = pd.Timestamp(ini_comp).normalize()
+  fim_comp = pd.Timestamp(fim_comp).normalize()
+
+  out = df_ausencias.copy().reset_index(drop=True)
+  dt_inis = out["DATA_INICIO"].apply(parse_data_filtro) if "DATA_INICIO" in out.columns else pd.Series(pd.NaT, index=out.index)
+
+  def _fim_linha(row):
+    dt_fim = parse_data_filtro(row.get("DATA_FIM", ""))
+    if dt_fim is not None and pd.notna(dt_fim):
+      return pd.Timestamp(dt_fim).normalize()
+    dt_ini = parse_data_filtro(row.get("DATA_INICIO", ""))
+    dias = pd.to_numeric(row.get("DIAS", 0), errors="coerce")
+    try:
+      dias = int(dias)
+    except Exception:
+      dias = 0
+    if dt_ini is None or pd.isna(dt_ini) or dias <= 0:
+      return pd.NaT
+    return pd.Timestamp(dt_ini).normalize() + pd.Timedelta(days=dias - 1)
+
+  dt_fims = out.apply(_fim_linha, axis=1)
+  mask = dt_inis.notna() & dt_fims.notna() & (dt_inis <= fim_comp) & (dt_fims >= ini_comp)
+  out = out.loc[mask].copy()
+
+  if out.empty:
+    out["DIAS_COMPETENCIA"] = pd.Series(dtype=int)
+    return out
+
+  dt_inis2 = out["DATA_INICIO"].apply(parse_data_filtro)
+  dt_fims2 = out.apply(_fim_linha, axis=1)
+  ini_inter = pd.concat([dt_inis2.rename("ini"), pd.Series(ini_comp, index=out.index, name="comp_ini")], axis=1).max(axis=1)
+  fim_inter = pd.concat([dt_fims2.rename("fim"), pd.Series(fim_comp, index=out.index, name="comp_fim")], axis=1).min(axis=1)
+  out["DIAS_COMPETENCIA"] = ((fim_inter - ini_inter).dt.days + 1).astype(int)
+  return out.reset_index(drop=True)
+
+
 def filtrar_desclassificacoes_competencia(df_desclassificacoes: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
   """Retorna somente desclassificações lançadas dentro da competência 26-25.
 
@@ -3503,15 +3556,36 @@ with tabs[7]:
                 if ad<=0: st.error("Data final inválida")
                 else:
                     novo=pd.DataFrame([{"MOTORISTA":am,"TIPO_AUSENCIA":at,"DATA_INICIO":ai.strftime('%d/%m/%Y'),"DATA_FIM":af.strftime('%d/%m/%Y'),"DIAS":ad,"OBSERVACAO":ao}]); st.session_state.ausencias=pd.concat([st.session_state.ausencias,novo],ignore_index=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
-        st.dataframe(_motoristas_filial(st.session_state.ausencias),use_container_width=True,hide_index=True)
-        if not st.session_state.ausencias.empty:
-            opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
+        aus_comp = filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim)
+        aus_comp = _motoristas_filial(aus_comp)
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.copy()
+            # A tela deve mostrar os dias que pertencem à competência atual,
+            # sem alterar a quantidade total armazenada no lançamento.
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"])
+        else:
+            aus_exib = aus_comp
+        st.dataframe(aus_exib,use_container_width=True,hide_index=True)
+        if not aus_comp.empty:
+            opts=[ausencia_label(i,r) for i,r in aus_comp.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
             if st.button("🗑️ Excluir registro selecionado",key="axx", disabled=(not is_admin)):
-                idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
+                selecionado=int(sel.split(']')[0].replace('[',''))
+                # Localiza o registro exibido na lista filtrada e exclui no dataframe original.
+                linha_original = aus_comp.index[selecionado]
+                st.session_state.ausencias=st.session_state.ausencias.drop(index=linha_original).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
     else:
         st.subheader("Ausências — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
-        st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
+        aus_comp = filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim)
+        aus_comp = _motoristas_filial(aus_comp)
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.copy()
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"])
+        else:
+            aus_exib = aus_comp
+        st.dataframe(aus_exib, use_container_width=True, hide_index=True)
 with tabs[10]:
     # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
     df_descl_comp = filtrar_desclassificacoes_competencia(
