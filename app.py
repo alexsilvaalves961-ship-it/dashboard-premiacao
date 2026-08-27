@@ -3561,12 +3561,115 @@ with tabs[10]:
         else:
             st.info("Nenhuma desclassificação lançada na competência selecionada.")
 
-        sem_data = st.session_state.desclassificacoes[
-            st.session_state.desclassificacoes.get("DATA_EVENTO", pd.Series(index=st.session_state.desclassificacoes.index,dtype=str)).fillna("").astype(str).str.strip().eq("")
-        ] if not st.session_state.desclassificacoes.empty else pd.DataFrame()
-        sem_data = _motoristas_filial(sem_data)
+        # ------------------------------------------------------------
+        # MIGRAÇÃO DOS LANÇAMENTOS ANTIGOS
+        # ------------------------------------------------------------
+        # Lançamentos antigos não possuem DATA_EVENTO. Para evitar que
+        # o usuário precise apagar e relançar cada item, o administrador
+        # pode atribuir uma única data de enquadramento a um ou vários
+        # registros. A data escolhida só define a competência 26->25;
+        # não altera motorista, critério ou pontos do lançamento.
+        sem_data_full = (
+            st.session_state.desclassificacoes[
+                st.session_state.desclassificacoes.get(
+                    "DATA_EVENTO",
+                    pd.Series(index=st.session_state.desclassificacoes.index, dtype=str),
+                )
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq("")
+            ]
+            if not st.session_state.desclassificacoes.empty
+            else pd.DataFrame()
+        )
+        sem_data = _motoristas_filial(sem_data_full)
         if not sem_data.empty:
-            st.warning("Existem lançamentos antigos sem DATA_EVENTO. Eles permanecem no histórico, mas não afetam nenhuma competência até receberem uma data.")
+            st.warning(
+                "Existem lançamentos antigos sem DATA_EVENTO. Eles não afetam nenhuma competência até serem regularizados abaixo."
+            )
+
+            # Competências disponíveis para enquadramento.
+            competencia_base = pd.Timestamp(dt_ini).normalize()
+            competencias = []
+            for k in range(-2, 13):
+                inicio_c = competencia_base + pd.DateOffset(months=k)
+                fim_c = inicio_c + pd.DateOffset(months=1) - pd.Timedelta(days=1)
+                label_c = f"{inicio_c.strftime('%d/%m/%Y')} → {fim_c.strftime('%d/%m/%Y')}"
+                competencias.append((label_c, inicio_c.date(), fim_c.date()))
+
+            st.markdown("#### 🛠️ Regularizar lançamentos antigos")
+            st.caption(
+                "Selecione os registros antigos e informe a competência em que eles realmente ocorreram. "
+                "A aplicação preencherá a DATA_EVENTO sem alterar os demais dados."
+            )
+
+            legado_df = sem_data.copy()
+            legado_df["_IDX_ORIGINAL"] = legado_df.index
+            opcoes_legado = []
+            for _, r in legado_df.iterrows():
+                idx_leg = int(r["_IDX_ORIGINAL"])
+                opcoes_legado.append(
+                    f"[{idx_leg}] {r.get('MOTORISTA','')} — "
+                    f"{str(r.get('CRITERIO','')).split('[',1)[0].strip()} — "
+                    f"{r.get('PONTOS',1)} ponto(s)"
+                )
+
+            selecionados_legado = st.multiselect(
+                "📋 Registros antigos para regularizar",
+                opcoes_legado,
+                default=opcoes_legado,
+                key="legado_sel_descl",
+            )
+
+            labels_comp = [x[0] for x in competencias]
+            comp_label = st.selectbox(
+                "📅 Competência de destino",
+                labels_comp,
+                index=min(2, len(labels_comp)-1),
+                key="legado_comp_descl",
+            )
+            comp_ini, comp_fim = next((a,b) for label,a,b in competencias if label == comp_label)
+            data_enq = st.date_input(
+                "📌 Data de enquadramento",
+                value=comp_ini,
+                min_value=comp_ini,
+                max_value=comp_fim,
+                key="legado_data_descl",
+                help="Pode ser qualquer data dentro da competência escolhida. Ela serve para enquadrar o lançamento no período 26→25."
+            )
+
+            c_mig1, c_mig2 = st.columns([1, 1])
+            with c_mig1:
+                st.metric("Registros antigos", len(opcoes_legado))
+            with c_mig2:
+                st.metric("Selecionados", len(selecionados_legado))
+
+            if st.button(
+                "✅ Aplicar competência aos registros selecionados",
+                key="migrar_legado_descl",
+                use_container_width=True,
+                disabled=(not is_admin or not selecionados_legado),
+            ):
+                indices_escolhidos = []
+                for texto in selecionados_legado:
+                    try:
+                        indices_escolhidos.append(int(texto.split("]",1)[0].replace("[","")))
+                    except Exception:
+                        pass
+
+                df_atual = st.session_state.desclassificacoes.copy()
+                data_str = data_enq.strftime('%d/%m/%Y')
+                for idx_leg in indices_escolhidos:
+                    if idx_leg in df_atual.index:
+                        df_atual.at[idx_leg, "DATA_EVENTO"] = data_str
+
+                st.session_state.desclassificacoes = df_atual
+                salvar_desclassificacoes(df_atual)
+                st.success(
+                    f"{len(indices_escolhidos)} lançamento(s) regularizado(s) na competência {comp_label}."
+                )
+                st.rerun()
 
     else:
         st.subheader("Desclassificações — somente consulta")
