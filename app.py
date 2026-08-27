@@ -2061,24 +2061,43 @@ def aplicar_regras_gerais(
 # GERADOR DE DATAFRAME EXCLUSIVO DO RH
 # ================================================================
 def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
+  """Monta o RH usando a FILIAL FIXA do cadastro e o prêmio final calculado.
+
+  A filial do motorista é cadastral e não deve variar conforme placa, categoria ou
+  abastecimento. Placas/categorias podem variar, mas a base do colaborador é sempre
+  a que está registrada em `cadastro`.
+  """
   if df_resumo.empty or "MOTORISTA" not in df_resumo.columns:
-    return pd.DataFrame(columns=["NOME", "FILIAL", "VALOR PAGO"])
+    return pd.DataFrame(columns=["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO"])
 
   if "STATUS_MOTORISTA" in df_resumo.columns:
     df_rh = df_resumo[df_resumo["STATUS_MOTORISTA"] == "ATIVO"].copy()
   else:
     df_rh = df_resumo.copy()
 
+  # Código funcional continua vindo do cadastro do colaborador.
   if "CODIGO_FUNCIONAL" not in df_rh.columns:
     codigos = carregar_codigos_funcionais()
     df_rh["CODIGO_FUNCIONAL"] = df_rh["MOTORISTA"].apply(
         lambda x: codigos.get(DataUtils.normalizar_texto(x), "")
     )
 
-  rh_df = pd.DataFrame()
-  rh_df["CÓDIGO FUNCIONAL"] = df_rh.get("CODIGO_FUNCIONAL", "")
-  rh_df["NOME"] = df_rh["MOTORISTA"]
-  rh_df["FILIAL"] = df_rh["BASE"].fillna("CIANORTE")
+  # FILIAL: fonte única = tela de Gestão de Cadastros / cadastro de motoristas.
+  # Não usar BASE do resumo como fonte de verdade, pois ela pode ter sido carregada
+  # a partir do processamento dos abastecimentos.
+  filial_por_motorista = {}
+  try:
+    cad_rh = cadastro.copy()
+    if not cad_rh.empty:
+      cad_rh["_MOTORISTA_RH"] = cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
+      cad_rh["_FILIAL_RH"] = cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto)
+      cad_rh = cad_rh.drop_duplicates("_MOTORISTA_RH", keep="last")
+      filial_por_motorista = dict(zip(cad_rh["_MOTORISTA_RH"], cad_rh["_FILIAL_RH"]))
+  except Exception:
+    filial_por_motorista = {}
+
+  df_rh["_MOTORISTA_RH"] = df_rh["MOTORISTA"].apply(DataUtils.normalizar_texto)
+  df_rh["FILIAL"] = df_rh["_MOTORISTA_RH"].map(filial_por_motorista).fillna("")
 
   def formatar_valor_pago(x):
     if pd.isna(x):
@@ -2092,7 +2111,12 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
     except Exception:
       return "R$ 0,00"
 
-  rh_df["VALOR PAGO"] = df_rh["PREMIO"].map(formatar_valor_pago)
+  rh_df = pd.DataFrame({
+      "CÓDIGO FUNCIONAL": df_rh.get("CODIGO_FUNCIONAL", ""),
+      "NOME": df_rh["MOTORISTA"],
+      "FILIAL": df_rh["FILIAL"],
+      "VALOR PAGO": df_rh["PREMIO"].map(formatar_valor_pago),
+  })
   return rh_df
 
 
