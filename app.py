@@ -3396,6 +3396,9 @@ with tabs[5]:
             key="cadastro_motorista_editar",
         )
         motorista_editar_norm = DataUtils.normalizar_texto(motorista_editar)
+        # Chaves exclusivas por motorista fazem os campos do formulário
+        # reconstruírem com os valores do cadastro selecionado.
+        edit_key = re.sub(r"[^A-Z0-9_]+", "_", motorista_editar_norm) or "SEM_NOME"
         linha_edit = cadastro[
             cadastro["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto) == motorista_editar_norm
         ]
@@ -3415,31 +3418,31 @@ with tabs[5]:
 
         e1,e2,e3 = st.columns(3)
         with e1:
-            nome_novo_edit = st.text_input("👤 Nome do motorista", value=nome_atual, key="cad_edit_nome")
+            nome_novo_edit = st.text_input("👤 Nome do motorista", value=nome_atual, key=f"cad_edit_nome_{edit_key}")
         with e2:
             tipos_edicao = sorted(set(precos["TIPO"].dropna().astype(str).tolist() + ["FOLGUISTA"]))
-            tipo_novo_edit = st.selectbox("🏷️ Categoria padrão", tipos_edicao, index=(tipos_edicao.index(tipo_atual) if tipo_atual in tipos_edicao else 0), key="cad_edit_tipo")
+            tipo_novo_edit = st.selectbox("🏷️ Categoria padrão", tipos_edicao, index=(tipos_edicao.index(tipo_atual) if tipo_atual in tipos_edicao else 0), key=f"cad_edit_tipo_{edit_key}")
         with e3:
             base_opcoes_edicao = sorted(set(cadastro["BASE_CADASTRO"].dropna().astype(str).tolist()) | {base_atual})
             base_opcoes_edicao = [x for x in base_opcoes_edicao if str(x).strip()]
             if base_atual and base_atual not in base_opcoes_edicao:
                 base_opcoes_edicao.insert(0, base_atual)
-            base_nova_edit = st.selectbox("🏢 Filial / Base", base_opcoes_edicao, index=(base_opcoes_edicao.index(base_atual) if base_atual in base_opcoes_edicao else 0), key="cad_edit_base") if base_opcoes_edicao else st.text_input("🏢 Filial / Base", value=base_atual, key="cad_edit_base_text")
+            base_nova_edit = st.selectbox("🏢 Filial / Base", base_opcoes_edicao, index=(base_opcoes_edicao.index(base_atual) if base_atual in base_opcoes_edicao else 0), key=f"cad_edit_base_{edit_key}") if base_opcoes_edicao else st.text_input("🏢 Filial / Base", value=base_atual, key=f"cad_edit_base_text_{edit_key}")
 
         e4,e5,e6 = st.columns(3)
         with e4:
-            codigo_novo_edit = st.text_input("🆔 Código funcional", value=codigo_atual, key="cad_edit_codigo")
+            codigo_novo_edit = st.text_input("🆔 Código funcional", value=codigo_atual, key=f"cad_edit_codigo_{edit_key}")
         with e5:
-            data_contratacao_nova_edit = st.text_input("📅 Data de contratação", value=data_contratacao_atual_edit, placeholder="DD/MM/AAAA", key="cad_edit_data_contratacao")
+            data_contratacao_nova_edit = st.text_input("📅 Data de contratação", value=data_contratacao_atual_edit, placeholder="DD/MM/AAAA", key=f"cad_edit_data_contratacao_{edit_key}")
         with e6:
-            data_inativacao_nova_edit = st.text_input("📅 Data de inativação", value=data_inativacao_atual_edit, placeholder="DD/MM/AAAA", key="cad_edit_data_inativacao")
+            data_inativacao_nova_edit = st.text_input("📅 Data de inativação", value=data_inativacao_atual_edit, placeholder="DD/MM/AAAA", key=f"cad_edit_data_inativacao_{edit_key}")
 
         status_novo_edit = st.radio(
             "🔘 Status do motorista",
             ["ATIVO", "INATIVO"],
             index=1 if status_atual_edit == "INATIVO" else 0,
             horizontal=True,
-            key="cad_edit_status",
+            key=f"cad_edit_status_{edit_key}",
         )
 
         if st.button("💾 Salvar cadastro completo", key="btn_salvar_cadastro_completo", disabled=(not is_admin), use_container_width=True):
