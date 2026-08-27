@@ -2075,29 +2075,35 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
   else:
     df_rh = df_resumo.copy()
 
-  # Código funcional continua vindo do cadastro do colaborador.
-  if "CODIGO_FUNCIONAL" not in df_rh.columns:
-    codigos = carregar_codigos_funcionais()
-    df_rh["CODIGO_FUNCIONAL"] = df_rh["MOTORISTA"].apply(
-        lambda x: codigos.get(DataUtils.normalizar_texto(x), "")
-    )
-
-  # FILIAL: fonte única = tela de Gestão de Cadastros / cadastro de motoristas.
-  # Não usar BASE do resumo como fonte de verdade, pois ela pode ter sido carregada
-  # a partir do processamento dos abastecimentos.
+  # CÓDIGO FUNCIONAL e FILIAL: fonte oficial = Gestão de Cadastros.
+  # Mantém um fallback no arquivo histórico de códigos apenas para não apagar
+  # um código já existente durante a transição.
   filial_por_motorista = {}
+  codigo_por_motorista = {}
   try:
-    cad_rh = cadastro.copy()
+    cad_rh = cadastro_all.copy() if "cadastro_all" in globals() else cadastro.copy()
     if not cad_rh.empty:
       cad_rh["_MOTORISTA_RH"] = cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
       cad_rh["_FILIAL_RH"] = cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto)
+      if "CODIGO_FUNCIONAL" in cad_rh.columns:
+        cad_rh["_CODIGO_RH"] = cad_rh["CODIGO_FUNCIONAL"].fillna("").astype(str).str.strip()
+      else:
+        cad_rh["_CODIGO_RH"] = ""
       cad_rh = cad_rh.drop_duplicates("_MOTORISTA_RH", keep="last")
       filial_por_motorista = dict(zip(cad_rh["_MOTORISTA_RH"], cad_rh["_FILIAL_RH"]))
+      codigo_por_motorista = dict(zip(cad_rh["_MOTORISTA_RH"], cad_rh["_CODIGO_RH"]))
   except Exception:
     filial_por_motorista = {}
+    codigo_por_motorista = {}
 
+  codigos_fallback = carregar_codigos_funcionais()
   df_rh["_MOTORISTA_RH"] = df_rh["MOTORISTA"].apply(DataUtils.normalizar_texto)
   df_rh["FILIAL"] = df_rh["_MOTORISTA_RH"].map(filial_por_motorista).fillna("")
+  df_rh["CODIGO_FUNCIONAL"] = df_rh["_MOTORISTA_RH"].map(codigo_por_motorista)
+  df_rh["CODIGO_FUNCIONAL"] = df_rh["CODIGO_FUNCIONAL"].where(
+      df_rh["CODIGO_FUNCIONAL"].fillna("").astype(str).str.strip() != "",
+      df_rh["_MOTORISTA_RH"].map(codigos_fallback).fillna(""),
+  )
 
   def formatar_valor_pago(x):
     if pd.isna(x):
@@ -3375,6 +3381,131 @@ with tabs[5]:
             "ATIVO": "🟢 ATIVO",
             "INATIVO": "🔴 INATIVO",
         })
+    # ============================================================
+    # EDIÇÃO COMPLETA DO CADASTRO DO MOTORISTA
+    # ============================================================
+    st.markdown("#### ✏️ Editar cadastro completo do motorista")
+    st.caption("Altere nome, código funcional, categoria, filial, datas e status. A filial informada aqui é a fonte oficial do RH.")
+    cadastro_edit_lista = sorted(
+        cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist()
+    )
+    if cadastro_edit_lista:
+        motorista_editar = st.selectbox(
+            "Selecionar motorista para editar",
+            cadastro_edit_lista,
+            key="cadastro_motorista_editar",
+        )
+        motorista_editar_norm = DataUtils.normalizar_texto(motorista_editar)
+        linha_edit = cadastro[
+            cadastro["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto) == motorista_editar_norm
+        ]
+        linha_edit = linha_edit.iloc[0] if not linha_edit.empty else pd.Series(dtype=object)
+
+        codigos_edit = carregar_codigos_funcionais()
+        datas_edit = carregar_datas_motoristas()
+        inativos_edit = carregar_inativos()
+
+        nome_atual = str(linha_edit.get("MOTORISTA_CADASTRO", motorista_editar)).strip()
+        tipo_atual = str(linha_edit.get("TIPO_CADASTRO", "TRUCK")).strip() or "TRUCK"
+        base_atual = str(linha_edit.get("BASE_CADASTRO", "")).strip()
+        codigo_atual = str(codigos_edit.get(motorista_editar_norm, linha_edit.get("CODIGO_FUNCIONAL", "")) or "").strip()
+        data_contratacao_atual_edit = str(datas_edit.get(motorista_editar_norm, linha_edit.get("DATA_CONTRATACAO", "")) or "").strip()
+        data_inativacao_atual_edit = str(inativos_edit.get("MOTORISTA", {}).get(motorista_editar_norm, linha_edit.get("DATA_INATIVACAO", "")) or "").strip()
+        status_atual_edit = "INATIVO" if motorista_editar_norm in inativos_edit.get("MOTORISTA", {}) else "ATIVO"
+
+        e1,e2,e3 = st.columns(3)
+        with e1:
+            nome_novo_edit = st.text_input("👤 Nome do motorista", value=nome_atual, key="cad_edit_nome")
+        with e2:
+            tipos_edicao = sorted(set(precos["TIPO"].dropna().astype(str).tolist() + ["FOLGUISTA"]))
+            tipo_novo_edit = st.selectbox("🏷️ Categoria padrão", tipos_edicao, index=(tipos_edicao.index(tipo_atual) if tipo_atual in tipos_edicao else 0), key="cad_edit_tipo")
+        with e3:
+            base_opcoes_edicao = sorted(set(cadastro["BASE_CADASTRO"].dropna().astype(str).tolist()) | {base_atual})
+            base_opcoes_edicao = [x for x in base_opcoes_edicao if str(x).strip()]
+            if base_atual and base_atual not in base_opcoes_edicao:
+                base_opcoes_edicao.insert(0, base_atual)
+            base_nova_edit = st.selectbox("🏢 Filial / Base", base_opcoes_edicao, index=(base_opcoes_edicao.index(base_atual) if base_atual in base_opcoes_edicao else 0), key="cad_edit_base") if base_opcoes_edicao else st.text_input("🏢 Filial / Base", value=base_atual, key="cad_edit_base_text")
+
+        e4,e5,e6 = st.columns(3)
+        with e4:
+            codigo_novo_edit = st.text_input("🆔 Código funcional", value=codigo_atual, key="cad_edit_codigo")
+        with e5:
+            data_contratacao_nova_edit = st.text_input("📅 Data de contratação", value=data_contratacao_atual_edit, placeholder="DD/MM/AAAA", key="cad_edit_data_contratacao")
+        with e6:
+            data_inativacao_nova_edit = st.text_input("📅 Data de inativação", value=data_inativacao_atual_edit, placeholder="DD/MM/AAAA", key="cad_edit_data_inativacao")
+
+        status_novo_edit = st.radio(
+            "🔘 Status do motorista",
+            ["ATIVO", "INATIVO"],
+            index=1 if status_atual_edit == "INATIVO" else 0,
+            horizontal=True,
+            key="cad_edit_status",
+        )
+
+        if st.button("💾 Salvar cadastro completo", key="btn_salvar_cadastro_completo", disabled=(not is_admin), use_container_width=True):
+            nome_novo_norm = DataUtils.normalizar_texto(nome_novo_edit)
+            if not nome_novo_norm:
+                st.error("O nome do motorista é obrigatório.")
+            elif not str(base_nova_edit).strip():
+                st.error("A filial / base é obrigatória.")
+            elif status_novo_edit == "INATIVO" and not str(data_inativacao_nova_edit).strip():
+                st.error("Informe a data de inativação para um motorista inativo.")
+            else:
+                # Atualiza o cadastro persistente. Se o nome mudou, substitui a linha antiga.
+                df_mot = carregar_motoristas_customizados().copy()
+                if df_mot.empty:
+                    df_mot = pd.DataFrame(columns=["MOTORISTAS", "TIPO", "BASE"])
+                for c in ["MOTORISTAS", "TIPO", "BASE"]:
+                    if c not in df_mot.columns:
+                        df_mot[c] = ""
+                df_mot["MOTORISTAS"] = df_mot["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+                mask_old = df_mot["MOTORISTAS"] == motorista_editar_norm
+                novo_reg = pd.DataFrame([{"MOTORISTAS": nome_novo_norm, "TIPO": DataUtils.normalizar_texto(tipo_novo_edit), "BASE": DataUtils.normalizar_texto(base_nova_edit)}])
+                df_mot = df_mot.loc[~mask_old].copy()
+                # Evita duplicar o novo nome. O registro editado passa a ser a referência mais recente.
+                df_mot = df_mot[df_mot["MOTORISTAS"] != nome_novo_norm].copy()
+                df_mot = pd.concat([df_mot, novo_reg], ignore_index=True)
+                salvar_motoristas_customizados(df_mot)
+
+                # Migra/atualiza dados vinculados ao nome quando houver alteração.
+                novo_cad_key = nome_novo_norm
+                if nome_novo_key := novo_cad_key:
+                    # Código funcional
+                    cod_df = pd.DataFrame({"MOTORISTA": list(codigos_edit.keys()), "CODIGO_FUNCIONAL": list(codigos_edit.values())})
+                    if not cod_df.empty:
+                        cod_df["MOTORISTA"] = cod_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+                        cod_df = cod_df[cod_df["MOTORISTA"] != motorista_editar_norm]
+                    cod_df = pd.concat([cod_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "CODIGO_FUNCIONAL": str(codigo_novo_edit or '').strip()}])], ignore_index=True)
+                    cod_df.to_csv(ARQUIVO_CODIGOS_FUNCIONAIS, index=False, encoding="utf-8-sig")
+
+                    # Data de contratação
+                    dt_df = pd.DataFrame({"MOTORISTA": list(datas_edit.keys()), "DATA_CONTRATACAO": list(datas_edit.values())})
+                    if not dt_df.empty:
+                        dt_df["MOTORISTA"] = dt_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+                        dt_df = dt_df[dt_df["MOTORISTA"] != motorista_editar_norm]
+                    dt_df = pd.concat([dt_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "DATA_CONTRATACAO": str(data_contratacao_nova_edit or '').strip()}])], ignore_index=True)
+                    dt_df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+
+                    # Status / data de inativação
+                    inat_df = pd.DataFrame(columns=["TIPO", "VALOR", "DATA_INATIVACAO"])
+                    if os.path.exists(ARQUIVO_INATIVOS):
+                        try:
+                            inat_df = pd.read_csv(ARQUIVO_INATIVOS, dtype=str, encoding="utf-8-sig")
+                        except Exception:
+                            pass
+                    for c in ["TIPO", "VALOR", "DATA_INATIVACAO"]:
+                        if c not in inat_df.columns:
+                            inat_df[c] = ""
+                    inat_df["VALOR"] = inat_df["VALOR"].apply(DataUtils.normalizar_texto)
+                    inat_df = inat_df[~((inat_df["TIPO"] == "MOTORISTA") & (inat_df["VALOR"].isin([motorista_editar_norm, nome_novo_norm])))]
+                    if status_novo_edit == "INATIVO":
+                        inat_df = pd.concat([inat_df, pd.DataFrame([{"TIPO": "MOTORISTA", "VALOR": nome_novo_norm, "DATA_INATIVACAO": str(data_inativacao_nova_edit or '').strip()}])], ignore_index=True)
+                    inat_df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+
+                st.cache_resource.clear()
+                st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
+                st.rerun()
+
     st.markdown("##### 👥 Motoristas cadastrados")
     colunas_cad = [c for c in [
         "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO", "BASE_CADASTRO",
