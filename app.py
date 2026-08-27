@@ -107,7 +107,8 @@ def salvar_ausencias(df: pd.DataFrame):
 
 
 def carregar_desclassificacoes() -> pd.DataFrame:
-  """Carrega as desclassificações salvas em disco ou retorna DataFrame vazio."""
+  """Carrega as desclassificações com DATA_EVENTO para respeitar a competência 26-25."""
+  colunas = ["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "DATA_EVENTO", "OBSERVACAO"]
   if os.path.exists(ARQUIVO_DESCLASSIFICACOES):
     try:
       df = pd.read_csv(
@@ -115,12 +116,28 @@ def carregar_desclassificacoes() -> pd.DataFrame:
       )
       if "PONTOS" in df.columns:
         df["PONTOS"] = pd.to_numeric(df["PONTOS"], errors="coerce").fillna(1)
-      return df
+      else:
+        df["PONTOS"] = 1
+      if "DATA_EVENTO" not in df.columns:
+        # Compatibilidade com lançamentos antigos: não atribuir uma data falsa.
+        # Eles ficam marcados como legado e não entram em uma competência nova
+        # até receberem uma data pelo administrador.
+        df["DATA_EVENTO"] = ""
+      if "OBSERVACAO" not in df.columns:
+        df["OBSERVACAO"] = ""
+      if "MOTORISTA" not in df.columns:
+        df["MOTORISTA"] = ""
+      if "CRITERIO" not in df.columns:
+        df["CRITERIO"] = ""
+      if "TIPO_IMPACTO" not in df.columns:
+        df["TIPO_IMPACTO"] = "PONTOS"
+      for c in colunas:
+        if c not in df.columns:
+          df[c] = ""
+      return df[colunas]
     except Exception as e:
       print(f"Erro ao carregar desclassificações: {e}")
-  return pd.DataFrame(
-      columns=["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "OBSERVACAO"]
-  )
+  return pd.DataFrame(columns=colunas)
 
 
 def salvar_desclassificacoes(df: pd.DataFrame):
@@ -1859,6 +1876,25 @@ def _dias_ausencia_por_competencia(
     return acumulado
 
 
+def filtrar_desclassificacoes_competencia(df_desclassificacoes: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
+  """Retorna somente desclassificações lançadas dentro da competência 26-25.
+
+  A competência é inclusiva no início e no fim. Registros antigos sem DATA_EVENTO
+  são mantidos no histórico, mas não participam do cálculo mensal até receberem
+  uma data, evitando que uma desclassificação de um mês seja carregada para outro.
+  """
+  if df_desclassificacoes is None or df_desclassificacoes.empty:
+    return pd.DataFrame() if df_desclassificacoes is None else df_desclassificacoes.copy()
+  df = df_desclassificacoes.copy()
+  if data_inicio_comp is None or data_fim_comp is None or "DATA_EVENTO" not in df.columns:
+    return df
+  ini = pd.Timestamp(data_inicio_comp).normalize()
+  fim = pd.Timestamp(data_fim_comp).normalize()
+  datas = df["DATA_EVENTO"].apply(parse_data_filtro)
+  mask = datas.notna() & (datas >= ini) & (datas <= fim)
+  return df.loc[mask].copy()
+
+
 def aplicar_regras_gerais(
     df_resumo_original: pd.DataFrame,
     df_ausencias: pd.DataFrame,
@@ -1913,13 +1949,20 @@ def aplicar_regras_gerais(
     res["DIAS_EFETIVOS"] = 30
     res["PREMIO"] = res["PREMIO_BRUTO"]
 
+  # Desclassificações são eventos mensais: somente lançamentos da competência
+  # atual podem afetar o prêmio. Isso impede que um evento de agosto permaneça
+  # ativo na competência seguinte.
+  df_desclassificacoes_comp = filtrar_desclassificacoes_competencia(
+      df_desclassificacoes, data_inicio_comp, data_fim_comp
+  )
+
   if (
-      not df_desclassificacoes.empty
-      and "MOTORISTA" in df_desclassificacoes.columns
+      not df_desclassificacoes_comp.empty
+      and "MOTORISTA" in df_desclassificacoes_comp.columns
   ):
     for idx in res.index:
       m_nome = res.at[idx, "MOTORISTA"]
-      g = df_desclassificacoes[df_desclassificacoes["MOTORISTA"] == m_nome]
+      g = df_desclassificacoes_comp[df_desclassificacoes_comp["MOTORISTA"] == m_nome]
       if not g.empty:
         motivos_pilar1 = []
         diretos = g[g["TIPO_IMPACTO"] == "DESCLASSIFICADO"]
@@ -2768,7 +2811,7 @@ def ausencia_label(i, row):
     return f"[{i}] {row.get('MOTORISTA','')} — {row.get('TIPO_AUSENCIA','')} — {row.get('DATA_INICIO','')} até {row.get('DATA_FIM','')} ({row.get('DIAS',0)} dias)"
 
 def descl_label(i, row):
-    return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()}"
+    return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()} — {row.get('DATA_EVENTO','')}"
 
 def competencia_26_25(data_ref):
     """Retorna o início e o fim da competência que vai do dia 26 ao dia 25."""
@@ -3470,23 +3513,65 @@ with tabs[7]:
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
         st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
 with tabs[10]:
+    # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
+    df_descl_comp = filtrar_desclassificacoes_competencia(
+        st.session_state.desclassificacoes, dt_ini, dt_fim
+    )
+    df_descl_comp = _motoristas_filial(df_descl_comp)
+
     if is_admin:
         st.subheader("Gestão de Desclassificações (Pilar 1)")
+        st.info("Cada lançamento pertence somente à competência da DATA DO EVENTO. Ao mudar de competência, os eventos do mês anterior deixam de afetar o prêmio.")
         d_mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
         if d_mots:
-            dm=st.selectbox("Motorista",d_mots,key="dm"); dc=st.selectbox("Critério / Infração",CRITERIOS_PILAR_1,key="dc"); dp=st.number_input("Pontos / Eventos",min_value=1,value=1); do=st.text_input("Observação",key="do")
+            dm=st.selectbox("Motorista",d_mots,key="dm")
+            dc=st.selectbox("Critério / Infração",CRITERIOS_PILAR_1,key="dc")
+            dp=st.number_input("Pontos / Eventos",min_value=1,value=1,key="dp")
+            dd=st.date_input("Data do evento",value=dt_fim,key="dd")
+            do=st.text_input("Observação",key="do")
             if st.button("➕ Lançar",key="dadd", disabled=(not is_admin)):
-                num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1; ti="DESCLASSIFICADO" if num>=5 else "PONTOS"; novo=pd.DataFrame([{"MOTORISTA":dm,"CRITERIO":dc,"PONTOS":dp,"TIPO_IMPACTO":ti,"OBSERVACAO":do}]); st.session_state.desclassificacoes=pd.concat([st.session_state.desclassificacoes,novo],ignore_index=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
-        st.dataframe(_motoristas_filial(st.session_state.desclassificacoes),use_container_width=True,hide_index=True)
-        if not st.session_state.desclassificacoes.empty:
-            opts=[descl_label(i,r) for i,r in st.session_state.desclassificacoes.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="dx");
+                num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1
+                ti="DESCLASSIFICADO" if num>=5 else "PONTOS"
+                novo=pd.DataFrame([{
+                    "MOTORISTA":dm,
+                    "CRITERIO":dc,
+                    "PONTOS":dp,
+                    "TIPO_IMPACTO":ti,
+                    "DATA_EVENTO":dd.strftime('%d/%m/%Y'),
+                    "OBSERVACAO":do,
+                }])
+                st.session_state.desclassificacoes=pd.concat([st.session_state.desclassificacoes,novo],ignore_index=True)
+                salvar_desclassificacoes(st.session_state.desclassificacoes)
+                st.rerun()
+
+        if not df_descl_comp.empty:
+            exib=df_descl_comp.copy()
+            st.dataframe(exib,use_container_width=True,hide_index=True)
+            base_idx=exib.copy()
+            base_idx["_ORIG_INDEX"]=base_idx.index
+            opts=[]
+            for _,r in base_idx.iterrows():
+                opts.append(f"[{int(r['_ORIG_INDEX'])}] {r.get('MOTORISTA','')} — {str(r.get('CRITERIO','')).split('[',1)[0].strip()} — {r.get('DATA_EVENTO','')}")
+            sel=st.selectbox("🗑️ Registro para excluir",opts,key="dx")
             if st.button("🗑️ Excluir registro selecionado",key="dxx", disabled=(not is_admin)):
-                idx=int(sel.split(']')[0].replace('[','')); st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
+                idx=int(sel.split(']')[0].replace('[',''))
+                st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True)
+                salvar_desclassificacoes(st.session_state.desclassificacoes)
+                st.rerun()
+        else:
+            st.info("Nenhuma desclassificação lançada na competência selecionada.")
+
+        sem_data = st.session_state.desclassificacoes[
+            st.session_state.desclassificacoes.get("DATA_EVENTO", pd.Series(index=st.session_state.desclassificacoes.index,dtype=str)).fillna("").astype(str).str.strip().eq("")
+        ] if not st.session_state.desclassificacoes.empty else pd.DataFrame()
+        sem_data = _motoristas_filial(sem_data)
+        if not sem_data.empty:
+            st.warning("Existem lançamentos antigos sem DATA_EVENTO. Eles permanecem no histórico, mas não afetam nenhuma competência até receberem uma data.")
 
     else:
         st.subheader("Desclassificações — somente consulta")
-        st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de desclassificações são exclusivos do Administrador.")
-        st.dataframe(_motoristas_filial(st.session_state.desclassificacoes), use_container_width=True, hide_index=True)
+        st.info("Os eventos exibidos e considerados pertencem somente à competência selecionada. Eventos de meses anteriores não permanecem ativos.")
+        st.dataframe(df_descl_comp, use_container_width=True, hide_index=True)
 if is_admin:
     with tabs[12]:
         st.subheader("🔐 Gestão de Usuários")
