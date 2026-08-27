@@ -48,6 +48,7 @@ def _token_arquivos_viagens():
 ARQUIVO_AUSENCIAS = os.path.join(DATA_DIR, "ausencias.csv")
 ARQUIVO_DESCLASSIFICACOES = os.path.join(DATA_DIR, "desclassificacoes.csv")
 ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv")
+ARQUIVO_CATEGORIAS_VIGENCIA = os.path.join(DATA_DIR, "categorias_customizadas_vigencia.csv")
 ARQUIVO_FROTA_CUSTOM = os.path.join(DATA_DIR, "frota_customizada.csv")
 ARQUIVO_MOTORISTAS_CUSTOM = os.path.join(DATA_DIR, "motoristas_customizados.csv")
 ARQUIVO_INATIVOS = os.path.join(DATA_DIR, "inativos.csv")
@@ -196,6 +197,50 @@ def salvar_categorias_customizadas(mapa: dict):
   except Exception as e:
     print(f"Erro ao salvar categorias customizadas: {e}")
 
+
+
+def carregar_categorias_vigencia() -> pd.DataFrame:
+  cols = ["MOTORISTA_CHAVE", "CATEGORIA_ESCOLHIDA", "DATA_INICIO", "DATA_FIM"]
+  if os.path.exists(ARQUIVO_CATEGORIAS_VIGENCIA):
+    try:
+      df = pd.read_csv(ARQUIVO_CATEGORIAS_VIGENCIA, dtype=str, encoding="utf-8-sig").fillna("")
+      for c in cols:
+        if c not in df.columns: df[c] = ""
+      return df[cols]
+    except Exception as e: print(f"Erro ao carregar vigências de categorias: {e}")
+  legado = carregar_categorias_customizadas()
+  if not legado: return pd.DataFrame(columns=cols)
+  try: dt_ref = pd.Timestamp(datetime.fromtimestamp(os.path.getmtime(ARQUIVO_CATEGORIAS_CUSTOM))).normalize()
+  except Exception: dt_ref = pd.Timestamp.now().normalize()
+  if dt_ref.day >= 26:
+    ini = dt_ref.replace(day=26); fim = (ini + pd.DateOffset(months=1)).replace(day=25)
+  else:
+    fim = dt_ref.replace(day=25); ini = (fim - pd.DateOffset(months=1)).replace(day=26)
+  df = pd.DataFrame([{"MOTORISTA_CHAVE":str(k).strip().upper(),"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(v),"DATA_INICIO":ini.strftime("%d/%m/%Y"),"DATA_FIM":fim.strftime("%d/%m/%Y")} for k,v in legado.items() if str(k).strip() and str(v).strip()])
+  try: df.to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+  except Exception as e: print(f"Erro ao criar arquivo de vigência de categorias: {e}")
+  return df[cols] if not df.empty else pd.DataFrame(columns=cols)
+
+def salvar_categorias_vigencia(df: pd.DataFrame):
+  try:
+    garantir_diretorio(); cols=["MOTORISTA_CHAVE","CATEGORIA_ESCOLHIDA","DATA_INICIO","DATA_FIM"]; out=df.copy()
+    for c in cols:
+      if c not in out.columns: out[c] = ""
+    out[cols].fillna("").to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+  except Exception as e: print(f"Erro ao salvar vigências de categorias: {e}")
+
+def categorias_ativas_na_competencia(df_vig: pd.DataFrame, data_ini, data_fim) -> dict:
+  if df_vig is None or df_vig.empty: return {}
+  ini_c=pd.Timestamp(data_ini).normalize(); fim_c=pd.Timestamp(data_fim).normalize(); ativos={}
+  for _,row in df_vig.iterrows():
+    chave=str(row.get("MOTORISTA_CHAVE","")).strip().upper(); cat=DataUtils.normalizar_texto(row.get("CATEGORIA_ESCOLHIDA",""))
+    if not chave or not cat: continue
+    di=parse_data_filtro(row.get("DATA_INICIO","")); df=parse_data_filtro(row.get("DATA_FIM",""))
+    if di is None: di=ini_c
+    if df is None: df=fim_c
+    di=pd.Timestamp(di).normalize(); df=pd.Timestamp(df).normalize()
+    if di <= fim_c and df >= ini_c: ativos[chave]=cat
+  return ativos
 
 def carregar_frota_customizada() -> pd.DataFrame:
   if os.path.exists(ARQUIVO_FROTA_CUSTOM):
@@ -1876,59 +1921,6 @@ def _dias_ausencia_por_competencia(
     return acumulado
 
 
-def filtrar_ausencias_competencia(df_ausencias: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
-  """Mostra somente afastamentos que intersectam a competência 26-25.
-
-  O dia inicial e o dia final são inclusivos. Um afastamento que termina exatamente
-  no último dia da competência pertence àquela competência e não aparece na seguinte.
-  Para períodos que atravessam competências, a coluna DIAS_COMPETENCIA mostra apenas
-  os dias que caem na competência selecionada.
-  """
-  if df_ausencias is None or df_ausencias.empty:
-    return pd.DataFrame() if df_ausencias is None else df_ausencias.copy()
-  if data_inicio_comp is None or data_fim_comp is None:
-    return df_ausencias.copy()
-
-  ini_comp = parse_data_filtro(data_inicio_comp)
-  fim_comp = parse_data_filtro(data_fim_comp)
-  if ini_comp is None or fim_comp is None:
-    return df_ausencias.copy()
-  ini_comp = pd.Timestamp(ini_comp).normalize()
-  fim_comp = pd.Timestamp(fim_comp).normalize()
-
-  out = df_ausencias.copy().reset_index(drop=True)
-  dt_inis = out["DATA_INICIO"].apply(parse_data_filtro) if "DATA_INICIO" in out.columns else pd.Series(pd.NaT, index=out.index)
-
-  def _fim_linha(row):
-    dt_fim = parse_data_filtro(row.get("DATA_FIM", ""))
-    if dt_fim is not None and pd.notna(dt_fim):
-      return pd.Timestamp(dt_fim).normalize()
-    dt_ini = parse_data_filtro(row.get("DATA_INICIO", ""))
-    dias = pd.to_numeric(row.get("DIAS", 0), errors="coerce")
-    try:
-      dias = int(dias)
-    except Exception:
-      dias = 0
-    if dt_ini is None or pd.isna(dt_ini) or dias <= 0:
-      return pd.NaT
-    return pd.Timestamp(dt_ini).normalize() + pd.Timedelta(days=dias - 1)
-
-  dt_fims = out.apply(_fim_linha, axis=1)
-  mask = dt_inis.notna() & dt_fims.notna() & (dt_inis <= fim_comp) & (dt_fims >= ini_comp)
-  out = out.loc[mask].copy()
-
-  if out.empty:
-    out["DIAS_COMPETENCIA"] = pd.Series(dtype=int)
-    return out
-
-  dt_inis2 = out["DATA_INICIO"].apply(parse_data_filtro)
-  dt_fims2 = out.apply(_fim_linha, axis=1)
-  ini_inter = pd.concat([dt_inis2.rename("ini"), pd.Series(ini_comp, index=out.index, name="comp_ini")], axis=1).max(axis=1)
-  fim_inter = pd.concat([dt_fims2.rename("fim"), pd.Series(fim_comp, index=out.index, name="comp_fim")], axis=1).min(axis=1)
-  out["DIAS_COMPETENCIA"] = ((fim_inter - ini_inter).dt.days + 1).astype(int)
-  return out.reset_index(drop=True)
-
-
 def filtrar_desclassificacoes_competencia(df_desclassificacoes: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
   """Retorna somente desclassificações lançadas dentro da competência 26-25.
 
@@ -2816,6 +2808,7 @@ if not is_admin and FILIAL_ACESSO not in ("", "TODAS"):
 
 if "ausencias" not in st.session_state: st.session_state.ausencias = carregar_ausencias()
 if "desclassificacoes" not in st.session_state: st.session_state.desclassificacoes = carregar_desclassificacoes()
+if "categorias_vigencia" not in st.session_state: st.session_state.categorias_vigencia = carregar_categorias_vigencia()
 if "mapa_cat_custom" not in st.session_state: st.session_state.mapa_cat_custom = carregar_categorias_customizadas()
 if "excesso_velocidade" not in st.session_state: st.session_state.excesso_velocidade = carregar_excesso_velocidade()
 if "controle_jornada" not in st.session_state: st.session_state.controle_jornada = carregar_controle_jornada()
@@ -2900,6 +2893,8 @@ competencia_padrao = next(
     competencias_labels[-1] if competencias_labels else ""
 )
 competencia_lookup = {label: (ini_c, fim_c) for label, ini_c, fim_c in competencias_disponiveis}
+competencia_padrao_ini, competencia_padrao_fim = competencia_lookup.get(competencia_padrao, (min_dt, max_dt))
+st.session_state.mapa_cat_custom = categorias_ativas_na_competencia(st.session_state.categorias_vigencia, competencia_padrao_ini, competencia_padrao_fim)
 
 # Valores iniciais para os filtros
 initial = aplicar_filtros_st(min_dt, max_dt, "TODOS", "", "TODAS", "TODAS")
@@ -2936,6 +2931,7 @@ with st.sidebar:
         help="Ex.: Competência 08/2026 = 26/07/2026 a 25/08/2026."
     )
     dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
+    st.session_state.mapa_cat_custom = categorias_ativas_na_competencia(st.session_state.categorias_vigencia, dt_ini, dt_fim)
 
     st.markdown(
         f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
@@ -3393,120 +3389,67 @@ with tabs[4]:
         plate_opts=sorted(eventos_cat.loc[eventos_cat["CONDUTOR_NORMALIZADO"]==sm_norm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm_norm else []
         sp=st.selectbox("Placa",plate_opts,key="cat_plate_new") if plate_opts else ""
         sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()),key="cat_cat_new")
+        cv1,cv2=st.columns(2)
+        with cv1: cat_dt_ini=st.date_input("📅 Início da vigência",value=dt_ini,key="cat_vig_ini")
+        with cv2: cat_dt_fim=st.date_input("📅 Fim da vigência",value=dt_fim,key="cat_vig_fim")
+        st.caption("Por padrão, o mapeamento vale somente para a competência selecionada. Para mantê-lo em competências seguintes, defina uma data final posterior.")
         if st.button("💾 Salvar categoria",key="savecat", disabled=(not is_admin)) and sm and sp:
-            st.session_state.mapa_cat_custom[normalizar_chave_categoria_customizada(sm,sp)]=DataUtils.normalizar_texto(sc)
-            salvar_categorias_customizadas(st.session_state.mapa_cat_custom)
-            st.success("Categoria salva com sucesso.")
-            st.rerun()
+            if cat_dt_fim < cat_dt_ini: st.error("A data final não pode ser anterior à data inicial.")
+            else:
+                chave_nova=normalizar_chave_categoria_customizada(sm,sp); dfv=st.session_state.categorias_vigencia.copy(); dfv=dfv[dfv["MOTORISTA_CHAVE"].astype(str).str.upper()!=chave_nova].copy()
+                dfv=pd.concat([dfv,pd.DataFrame([{"MOTORISTA_CHAVE":chave_nova,"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(sc),"DATA_INICIO":cat_dt_ini.strftime("%d/%m/%Y"),"DATA_FIM":cat_dt_fim.strftime("%d/%m/%Y")}])],ignore_index=True)
+                st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Categoria salva com vigência definida."); st.rerun()
 
         mapa_atual = st.session_state.mapa_cat_custom or {}
-        if mapa_atual:
-            df_cat_custom = pd.DataFrame(
-                [
-                    {
-                        "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
-                        "PLACA": (str(chave).split("|||", 1)[1] if "|||" in str(chave) else ""),
-                        "CATEGORIA": str(valor),
-                        "_CHAVE": str(chave),
-                    }
-                    for chave, valor in mapa_atual.items()
-                ]
-            )
-
-            st.markdown("### 🛠️ Gerenciar categorias lançadas")
-            opcoes_cat = [
-                f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']}"
-                for i, row in df_cat_custom.reset_index(drop=True).iterrows()
-            ]
-            opcoes_cat_display = opcoes_cat if opcoes_cat else ["Nenhum registro disponível para a filial autorizada"]
-            selecionado_cat = st.selectbox(
-                "Selecionar registro",
-                opcoes_cat_display,
-                key="cat_registro_sel",
-                disabled=(not opcoes_cat),
-            )
-            reg_cat = None
-            if opcoes_cat:
-                idx_cat = int(selecionado_cat.split("]", 1)[0].replace("[", ""))
-                reg_cat = df_cat_custom.iloc[idx_cat]
-
-            ec1, ec2, ec3 = st.columns([2.2, 1.3, 1.5])
-            with ec1:
-                mot_edit = st.selectbox(
-                    "Motorista",
-                    mot_opts,
-                    index=(mot_opts.index(reg_cat["MOTORISTA"]) if reg_cat["MOTORISTA"] in mot_opts else 0),
-                    key="cat_mot_edit",
-                ) if mot_opts else ""
+        df_cat_custom = pd.DataFrame([
+            {
+                "MOTORISTA": (str(k).split("|||",1)[0] if "|||" in str(k) else str(k)),
+                "PLACA": (str(k).split("|||",1)[1] if "|||" in str(k) else ""),
+                "CATEGORIA": DataUtils.normalizar_texto(r.get("CATEGORIA_ESCOLHIDA","")),
+                "DATA_INICIO": str(r.get("DATA_INICIO","")),
+                "DATA_FIM": str(r.get("DATA_FIM","")),
+                "_CHAVE": str(k),
+            }
+            for _,r in st.session_state.categorias_vigencia.iterrows()
+            for k in [str(r.get("MOTORISTA_CHAVE","")).strip().upper()]
+            if k in mapa_atual
+        ])
+        if not df_cat_custom.empty:
+            st.markdown("### 🛠️ Gerenciar categorias da competência")
+            opcoes_cat=[f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']} — {row['DATA_INICIO']} a {row['DATA_FIM']}" for i,row in df_cat_custom.reset_index(drop=True).iterrows()]
+            selecionado_cat=st.selectbox("Selecionar registro",opcoes_cat,key="cat_registro_sel"); idx_cat=int(selecionado_cat.split("]",1)[0].replace("[","")); reg_cat=df_cat_custom.iloc[idx_cat]
+            ec1,ec2,ec3=st.columns([2.0,1.25,1.45])
+            with ec1: mot_edit=st.selectbox("Motorista",mot_opts,index=(mot_opts.index(reg_cat["MOTORISTA"]) if reg_cat["MOTORISTA"] in mot_opts else 0),key="cat_mot_edit") if mot_opts else ""
             with ec2:
-                placas_edit = sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"] == mot_edit, "PLACA_PADRONIZADA"].dropna().unique().tolist()) if mot_edit else []
-                if reg_cat["PLACA"] and reg_cat["PLACA"] not in placas_edit:
-                    placas_edit = [reg_cat["PLACA"]] + placas_edit
-                placa_edit = st.selectbox(
-                    "Placa",
-                    placas_edit,
-                    index=(placas_edit.index(reg_cat["PLACA"]) if reg_cat["PLACA"] in placas_edit else 0),
-                    key="cat_placa_edit",
-                ) if placas_edit else ""
+                placas_edit=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==DataUtils.normalizar_texto(mot_edit),"PLACA_PADRONIZADA"].dropna().unique().tolist()) if mot_edit else []
+                if reg_cat["PLACA"] and reg_cat["PLACA"] not in placas_edit: placas_edit=[reg_cat["PLACA"]]+placas_edit
+                placa_edit=st.selectbox("Placa",placas_edit,index=(placas_edit.index(reg_cat["PLACA"]) if reg_cat["PLACA"] in placas_edit else 0),key="cat_placa_edit") if placas_edit else ""
             with ec3:
-                categorias_edit = sorted(precos["TIPO"].unique().tolist())
-                categoria_edit = st.selectbox(
-                    "Categoria",
-                    categorias_edit,
-                    index=(categorias_edit.index(reg_cat["CATEGORIA"]) if reg_cat["CATEGORIA"] in categorias_edit else 0),
-                    key="cat_categoria_edit",
-                )
-
-            ac1, ac2 = st.columns(2)
+                categorias_edit=sorted(precos["TIPO"].unique().tolist()); categoria_edit=st.selectbox("Categoria",categorias_edit,index=(categorias_edit.index(reg_cat["CATEGORIA"]) if reg_cat["CATEGORIA"] in categorias_edit else 0),key="cat_categoria_edit")
+            ev1,ev2=st.columns(2)
+            with ev1: edit_dt_ini=st.date_input("📅 Início da vigência",value=parse_data_filtro(reg_cat["DATA_INICIO"]) or dt_ini,key="cat_edit_vig_ini")
+            with ev2: edit_dt_fim=st.date_input("📅 Fim da vigência",value=parse_data_filtro(reg_cat["DATA_FIM"]) or dt_fim,key="cat_edit_vig_fim")
+            ac1,ac2=st.columns(2)
             with ac1:
-                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin), use_container_width=True):
-                    chave_antiga = reg_cat["_CHAVE"]
-                    chave_nova = normalizar_chave_categoria_customizada(mot_edit, placa_edit)
-                    novo_mapa = dict(st.session_state.mapa_cat_custom)
-                    if chave_antiga != chave_nova:
-                        novo_mapa.pop(chave_antiga, None)
-                    novo_mapa[chave_nova] = DataUtils.normalizar_texto(categoria_edit)
-                    st.session_state.mapa_cat_custom = novo_mapa
-                    salvar_categorias_customizadas(novo_mapa)
-                    st.success("Mapeamento atualizado com sucesso.")
-                    st.rerun()
+                if st.button("✏️ Editar / Salvar alteração",key="cat_edit_btn",disabled=(not is_admin),use_container_width=True):
+                    if edit_dt_fim<edit_dt_ini: st.error("A data final não pode ser anterior à inicial.")
+                    else:
+                        chave_antiga=reg_cat["_CHAVE"]; chave_nova=normalizar_chave_categoria_customizada(mot_edit,placa_edit); dfv=st.session_state.categorias_vigencia.copy(); dfv=dfv[~dfv["MOTORISTA_CHAVE"].astype(str).str.upper().isin({str(chave_antiga).upper(),str(chave_nova).upper()})].copy(); dfv=pd.concat([dfv,pd.DataFrame([{"MOTORISTA_CHAVE":chave_nova,"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(categoria_edit),"DATA_INICIO":edit_dt_ini.strftime("%d/%m/%Y"),"DATA_FIM":edit_dt_fim.strftime("%d/%m/%Y")}])],ignore_index=True); st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Mapeamento atualizado com sucesso."); st.rerun()
             with ac2:
-                if st.button("🗑️ Excluir registro", key="cat_delete_btn", disabled=(not is_admin), use_container_width=True):
-                    chave_excluir = reg_cat["_CHAVE"]
-                    novo_mapa = {k: v for k, v in st.session_state.mapa_cat_custom.items() if k != chave_excluir}
-                    st.session_state.mapa_cat_custom = novo_mapa
-                    salvar_categorias_customizadas(novo_mapa)
-                    st.success("Mapeamento excluído com sucesso.")
-                    st.rerun()
-
-            st.dataframe(
-                df_cat_custom.drop(columns=["_CHAVE"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
+                if st.button("🗑️ Excluir registro",key="cat_delete_btn",disabled=(not is_admin),use_container_width=True):
+                    chave_excluir=str(reg_cat["_CHAVE"]).upper(); dfv=st.session_state.categorias_vigencia[st.session_state.categorias_vigencia["MOTORISTA_CHAVE"].astype(str).str.upper()!=chave_excluir].copy(); st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Mapeamento excluído com sucesso."); st.rerun()
+            st.dataframe(df_cat_custom.drop(columns=["_CHAVE"]),use_container_width=True,hide_index=True)
+        else: st.info("Nenhum mapeamento manual de categoria com vigência ativa nesta competência.")
     else:
         st.subheader("Categoria por Placa — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Edição e exclusão de categorias são exclusivas do Administrador.")
-        mapa_atual = st.session_state.mapa_cat_custom or {}
+        mapa_atual=st.session_state.mapa_cat_custom or {}
         if mapa_atual:
             permitidos_norm={DataUtils.normalizar_texto(x) for x in cadastro["MOTORISTA_CADASTRO"].dropna().astype(str)}
-            df_cat_view = pd.DataFrame([
-                {
-                    "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
-                    "PLACA": (str(chave).split("|||", 1)[1] if "|||" in str(chave) else ""),
-                    "CATEGORIA": str(valor),
-                }
-                for chave, valor in mapa_atual.items()
-                if is_admin or DataUtils.normalizar_texto((str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave))) in permitidos_norm
-            ])
-            if df_cat_view.empty:
-                st.info("Nenhum mapeamento manual de categoria disponível para a filial autorizada.")
-            else:
-                st.dataframe(df_cat_view, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
+            df_cat_view=pd.DataFrame([{"MOTORISTA":(k.split("|||",1)[0] if "|||" in k else k),"PLACA":(k.split("|||",1)[1] if "|||" in k else ""),"CATEGORIA":DataUtils.normalizar_texto(r.get("CATEGORIA_ESCOLHIDA","")),"DATA_INICIO":str(r.get("DATA_INICIO","")),"DATA_FIM":str(r.get("DATA_FIM",""))} for _,r in st.session_state.categorias_vigencia.iterrows() for k in [str(r.get("MOTORISTA_CHAVE","")).strip().upper()] if k in mapa_atual and DataUtils.normalizar_texto((k.split("|||",1)[0] if "|||" in k else k)) in permitidos_norm])
+            if df_cat_view.empty: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
+            else: st.dataframe(df_cat_view,use_container_width=True,hide_index=True)
+        else: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
 with tabs[11]:
     st.subheader("Relatório RH")
     st.caption("Relatório de pagamento: considera o prêmio final apurado para cada motorista na competência selecionada, após todas as regras e descontos. Não é um demonstrativo de abastecimentos.")
@@ -3556,36 +3499,15 @@ with tabs[7]:
                 if ad<=0: st.error("Data final inválida")
                 else:
                     novo=pd.DataFrame([{"MOTORISTA":am,"TIPO_AUSENCIA":at,"DATA_INICIO":ai.strftime('%d/%m/%Y'),"DATA_FIM":af.strftime('%d/%m/%Y'),"DIAS":ad,"OBSERVACAO":ao}]); st.session_state.ausencias=pd.concat([st.session_state.ausencias,novo],ignore_index=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
-        aus_comp = filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim)
-        aus_comp = _motoristas_filial(aus_comp)
-        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
-            aus_exib = aus_comp.copy()
-            # A tela deve mostrar os dias que pertencem à competência atual,
-            # sem alterar a quantidade total armazenada no lançamento.
-            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
-            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"])
-        else:
-            aus_exib = aus_comp
-        st.dataframe(aus_exib,use_container_width=True,hide_index=True)
-        if not aus_comp.empty:
-            opts=[ausencia_label(i,r) for i,r in aus_comp.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
+        st.dataframe(_motoristas_filial(st.session_state.ausencias),use_container_width=True,hide_index=True)
+        if not st.session_state.ausencias.empty:
+            opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
             if st.button("🗑️ Excluir registro selecionado",key="axx", disabled=(not is_admin)):
-                selecionado=int(sel.split(']')[0].replace('[',''))
-                # Localiza o registro exibido na lista filtrada e exclui no dataframe original.
-                linha_original = aus_comp.index[selecionado]
-                st.session_state.ausencias=st.session_state.ausencias.drop(index=linha_original).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
+                idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
     else:
         st.subheader("Ausências — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
-        aus_comp = filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim)
-        aus_comp = _motoristas_filial(aus_comp)
-        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
-            aus_exib = aus_comp.copy()
-            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
-            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"])
-        else:
-            aus_exib = aus_comp
-        st.dataframe(aus_exib, use_container_width=True, hide_index=True)
+        st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
 with tabs[10]:
     # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
     df_descl_comp = filtrar_desclassificacoes_competencia(
