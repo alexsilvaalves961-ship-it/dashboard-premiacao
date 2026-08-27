@@ -4032,7 +4032,14 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
                 ex_auto["DESCONTO"] = ex_auto["EVENTOS"] * ex_auto["VALOR/EVENTO"]
                 ex_auto["VALOR/EVENTO"] = ex_auto["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
                 ex_auto["DESCONTO"] = ex_auto["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
-                st.dataframe(ex_auto[["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]], use_container_width=True, hide_index=True)
+                # Algumas versões do extrato/arquivo podem não trazer todos os
+                # campos auxiliares. Exibe somente as colunas existentes,
+                # evitando KeyError e mantendo a importação automática.
+                colunas_auto = ["MOTORISTA", "FILIAL", "EVENTOS", "VALOR/EVENTO", "DESCONTO", "ARQUIVO_FONTE"]
+                for _c in colunas_auto:
+                    if _c not in ex_auto.columns:
+                        ex_auto[_c] = ""
+                st.dataframe(ex_auto[colunas_auto], use_container_width=True, hide_index=True)
                 st.caption("Os eventos acima são usados automaticamente no cálculo do prêmio. O lançamento manual fica disponível apenas como fallback quando não houver extrato para a competência.")
                 return
             st.caption("TRUCK R$ 1,40 | BITRUCK R$ 1,63 | CARRETA R$ 1,87 | BITREM R$ 2,10 | RODOTREM/RODOENTREGA R$ 2,45")
