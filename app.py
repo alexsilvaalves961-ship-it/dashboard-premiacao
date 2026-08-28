@@ -3964,6 +3964,27 @@ with tabs[5]:
                 st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
                 st.rerun()
 
+    # ============================================================
+    # VISUALIZAÇÃO DOS MOTORISTAS CADASTRADOS
+    # ============================================================
+    st.markdown("#### 👥 Motoristas cadastrados")
+    st.caption("Lista oficial de motoristas mantida na Gestão de Cadastros. Esta tabela é apenas para conferência e não é usada como fonte externa.")
+    cadastro_exib = cadastro.copy()
+    if not cadastro_exib.empty:
+        if "STATUS" in cadastro_exib.columns:
+            cadastro_exib["STATUS"] = cadastro_exib["STATUS"].replace({
+                "ATIVO": "🟢 ATIVO",
+                "INATIVO": "🔴 INATIVO",
+            })
+        colunas_cad = [c for c in [
+            "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO",
+            "BASE_CADASTRO", "EH_FOLGUISTA", "DATA_CONTRATACAO",
+            "STATUS", "DATA_INATIVACAO"
+        ] if c in cadastro_exib.columns]
+        st.dataframe(cadastro_exib[colunas_cad], use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum motorista cadastrado.")
+
     # A Gestão de Cadastros usa os dados internamente, mas as tabelas de cadastro
     # não ocupam mais espaço visual nesta tela.
     if is_admin:
