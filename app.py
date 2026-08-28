@@ -217,6 +217,9 @@ def _normalizar_base_abastecimentos_raw(df, mapa_frota):
   if any(c is None for c in [col_placa,col_km,col_litros,col_motorista,col_data]):
     return pd.DataFrame()
   out=df.copy()
+  # Identificador estável do registro, necessário para ordenar os abastecimentos
+  # quando os dados vêm dos históricos mensais.
+  out["_ORDEM_ORIGINAL"] = np.arange(len(out))
   out["PLACA_PADRONIZADA"]=out[col_placa].apply(DataUtils.padronizar_placa)
   out["KM_ATUAL_NUM"]=out[col_km].apply(DataUtils.converter_numero)
   out["QTDE_NUM"]=out[col_litros].apply(DataUtils.converter_numero)
@@ -294,6 +297,8 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
     for mm_out, yyyy_out, part in alvos:
       part = part.copy()
       part["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = part["CONDUTOR_NORMALIZADO"]
+      if "_ORDEM_ORIGINAL" not in part.columns:
+        part["_ORDEM_ORIGINAL"] = np.arange(len(part))
       for c in cols:
         if c not in part.columns: part[c] = ""
       part = part[cols].copy()
@@ -328,11 +333,21 @@ def _carregar_historico_abastecimentos_total():
       df["DATA_NUM"]=df["DATA_FILTRO"]
       df["DATA"]=df["DATA_FILTRO"]
       df["DATA_HORA_ABASTECIMENTO"]=df["DATA_HORA_ABASTECIMENTO"].apply(_parse_datetime_flex)
-      registros.append(df[_colunas_historico_abastecimentos()])
+      # O histórico mensal precisa fornecer também a ordem original usada pelo
+      # cálculo do KM anterior. Bases antigas não possuem esse campo, então
+      # recriamos uma ordem estável por arquivo.
+      df["_ORDEM_ORIGINAL"] = np.arange(len(df))
+      registros.append(df[_colunas_historico_abastecimentos() + ["_ORDEM_ORIGINAL"]])
     except Exception as exc:
       print(f"Erro ao carregar {nome}: {exc}")
   if not registros: return pd.DataFrame()
-  return pd.concat(registros,ignore_index=True)
+  combinado = pd.concat(registros,ignore_index=True)
+  # Garante identificador único e estável em todo o histórico consolidado.
+  if "_ORDEM_ORIGINAL" not in combinado.columns:
+    combinado["_ORDEM_ORIGINAL"] = np.arange(len(combinado))
+  else:
+    combinado["_ORDEM_ORIGINAL"] = np.arange(len(combinado))
+  return combinado
 
 ARQUIVO_USUARIOS_ACESSO = os.path.join(DATA_DIR, "usuarios_acesso.csv")
 
