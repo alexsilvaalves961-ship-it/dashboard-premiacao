@@ -153,6 +153,187 @@ ARQUIVO_DATAS_MOTORISTAS = os.path.join(DATA_DIR, "datas_motoristas.csv")
 ARQUIVO_CODIGOS_FUNCIONAIS = os.path.join(DATA_DIR, "codigos_funcionais.csv")
 ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
 ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
+
+# Abastecimentos mensais: arquivos do tipo abastecimentos_MMYYYY.xlsx
+# O sistema arquiva internamente cada competência em um CSV separado, evitando
+# manter uma única planilha gigante. O arquivo legado uah_abastecimentos_3.xlsx
+# é usado somente para uma migração inicial, quando ainda não existirem os arquivos
+# históricos internos.
+PADRAO_ABASTECIMENTOS_MENSAL = r"abastecimentos[_\s-]?(\d{2})[_-]?(\d{4})\.(xlsx|xlsm|xls)$"
+ARQUIVO_ABASTECIMENTOS_LEGADO = os.path.join(DATA_DIR, "uah_abastecimentos_3.xlsx")
+
+def _listar_arquivos_abastecimentos_mensais():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  for nome in nomes:
+    m = re.fullmatch(PADRAO_ABASTECIMENTOS_MENSAL, nome, flags=re.IGNORECASE)
+    if m:
+      encontrados.append((int(m.group(1)), int(m.group(2)), os.path.join(diretorio, nome)))
+  return sorted(encontrados, key=lambda x: (x[1], x[0], os.path.basename(x[2]).lower()))
+
+def _token_arquivos_abastecimentos_mensais():
+  token=[]
+  for mm, yyyy, caminho in _listar_arquivos_abastecimentos_mensais():
+    try: token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError: token.append((caminho,0.0,0))
+  try:
+    token.append((ARQUIVO_ABASTECIMENTOS_LEGADO, os.path.getmtime(ARQUIVO_ABASTECIMENTOS_LEGADO), os.path.getsize(ARQUIVO_ABASTECIMENTOS_LEGADO)))
+  except OSError:
+    token.append((ARQUIVO_ABASTECIMENTOS_LEGADO,0.0,0))
+  return tuple(token)
+
+def _arquivo_historico_abastecimentos(mm, yyyy):
+  return os.path.join(DATA_DIR, f"historico_abastecimentos_{mm:02d}{yyyy:04d}.csv")
+
+def _competencia_do_mes_abastecimento(mm, yyyy):
+  # arquivo 082026 = competência 26/07/2026 a 25/08/2026
+  fim = pd.Timestamp(year=yyyy, month=mm, day=25)
+  inicio = (fim - pd.DateOffset(months=1)).replace(day=26)
+  return inicio.normalize(), fim.normalize()
+
+def _ler_planilha_abastecimentos_generica(caminho):
+  try:
+    return pd.read_excel(caminho, sheet_name=0, dtype=str, keep_default_na=False)
+  except Exception as exc:
+    print(f"Erro ao ler abastecimentos {os.path.basename(caminho)}: {exc}")
+    return pd.DataFrame()
+
+def _normalizar_base_abastecimentos_raw(df, mapa_frota):
+  # Reutiliza exatamente a mesma normalização do DataLoader, mas recebe o DataFrame
+  # já lido para permitir arquivamento mensal sem alterar as colunas originais.
+  if df is None or df.empty:
+    return pd.DataFrame()
+  col_placa = DataUtils.encontrar_coluna(df, ["PLACA", "CAVALO"])
+  col_km = DataUtils.encontrar_coluna(df, ["KM ATUAL", "KM", "KM_1", "QUILOMETRAGEM"])
+  col_litros = DataUtils.encontrar_coluna(df, ["QTDE", "LITROS", "QUANTIDADE", "QTD"])
+  col_valor = DataUtils.encontrar_coluna(df, ["VALOR TOTAL","VALOR","TOTAL","VALOR_TOTAL","VR TOTAL","VLR TOTAL","VALOR COMBUSTIVEL","VALOR (R$)"])
+  col_motorista = DataUtils.encontrar_coluna(df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS"])
+  col_data = DataUtils.encontrar_coluna(df, ["DATA","Data","DATA ABASTECIMENTO","DATA_ABASTECIMENTO","DATA DO ABASTECIMENTO","DATA/HORA","DATA HORA","DATA EMISSAO","DT_ABASTECIMENTO","DT ABAST"])
+  col_hora = DataUtils.encontrar_coluna(df, ["HORA","Hora","HORARIO","HORA ABASTECIMENTO"])
+  if any(c is None for c in [col_placa,col_km,col_litros,col_motorista,col_data]):
+    return pd.DataFrame()
+  out=df.copy()
+  out["PLACA_PADRONIZADA"]=out[col_placa].apply(DataUtils.padronizar_placa)
+  out["KM_ATUAL_NUM"]=out[col_km].apply(DataUtils.converter_numero)
+  out["QTDE_NUM"]=out[col_litros].apply(DataUtils.converter_numero)
+  out["VALOR_NUM"]=out[col_valor].apply(DataUtils.converter_numero).fillna(0.0) if col_valor else 0.0
+  out["CONDUTOR_NORMALIZADO"]=out[col_motorista].fillna("SEM MOTORISTA").apply(DataUtils.normalizar_texto)
+  out["DATA_ORIGINAL"]=out[col_data]
+  out["DATA_FILTRO"]=out[col_data].apply(criar_data_filtro)
+  out["DATA_NUM"]=out["DATA_FILTRO"]
+  out["DATA"]=out["DATA_FILTRO"]
+  out["DATA_HORA_ABASTECIMENTO"]=out[col_data].apply(_parse_datetime_flex)
+  if col_hora:
+    hs=out[col_hora].apply(_parse_datetime_flex)
+    mask=hs.notna() & out["DATA_HORA_ABASTECIMENTO"].notna()
+    out.loc[mask,"DATA_HORA_ABASTECIMENTO"]=out.loc[mask,"DATA_HORA_ABASTECIMENTO"].dt.normalize()+pd.to_timedelta(hs.loc[mask].dt.hour*3600+hs.loc[mask].dt.minute*60+hs.loc[mask].dt.second,unit="s")
+  out["TIPO"]=out["PLACA_PADRONIZADA"].map(mapa_frota)
+  sem=out["TIPO"].isna()
+  for idx in out.index[sem]:
+    eq=DataUtils.placa_equivalente_mercosul(out.at[idx,"PLACA_PADRONIZADA"])
+    if eq and eq in mapa_frota: out.at[idx,"TIPO"]=mapa_frota[eq]
+  out["REGISTRO_VALIDO"]=(out["PLACA_PADRONIZADA"]!="") & out["KM_ATUAL_NUM"].notna() & (out["KM_ATUAL_NUM"]>0) & out["QTDE_NUM"].notna() & (out["QTDE_NUM"]>0)
+  return out
+
+def _colunas_historico_abastecimentos():
+  return ["PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM","CONDUTOR_NORMALIZADO","DATA_FILTRO","DATA_NUM","DATA","DATA_HORA_ABASTECIMENTO","TIPO","REGISTRO_VALIDO","MOTORISTA_ABASTECIMENTO_ORIGINAL"]
+
+def _arquivar_abastecimentos_mensais(mapa_frota):
+  """Importa fontes mensais/legadas para um histórico interno por competência.
+
+  Cada competência fica em um CSV separado (historico_abastecimentos_MMYYYY.csv),
+  evitando crescimento de uma única planilha. A importação é idempotente.
+  """
+  garantir_diretorio()
+  cols = _colunas_historico_abastecimentos()
+  fontes = []
+
+  # Migração única do arquivo antigo consolidado, se ele ainda existir.
+  if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO):
+    fontes.append((None, None, ARQUIVO_ABASTECIMENTOS_LEGADO, True))
+
+  # Arquivos mensais: abastecimentos_072026.xlsx, abastecimentos_082026.xlsx, ...
+  for mm,yyyy,caminho in _listar_arquivos_abastecimentos_mensais():
+    fontes.append((mm,yyyy,caminho,False))
+
+  for mm,yyyy,caminho,e_legado in fontes:
+    raw = _ler_planilha_abastecimentos_generica(caminho)
+    norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
+    if norm.empty or "DATA_FILTRO" not in norm.columns:
+      continue
+
+    datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce")
+    norm = norm.loc[datas.notna()].copy()
+    if norm.empty:
+      continue
+
+    if not e_legado:
+      fim_comp = pd.Timestamp(year=yyyy, month=mm, day=25).normalize()
+      ini_comp = (fim_comp - pd.DateOffset(months=1)).replace(day=26).normalize()
+      datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+      norm = norm.loc[(datas >= ini_comp) & (datas <= fim_comp)].copy()
+      if norm.empty:
+        continue
+      alvos = [(mm,yyyy,norm)]
+    else:
+      # Divide o legado pelas competências reais encontradas nos registros.
+      dt = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+      fim_comp = dt.apply(lambda d: (d + pd.DateOffset(months=1)).replace(day=25) if pd.notna(d) and d.day >= 26 else (d.replace(day=25) if pd.notna(d) else pd.NaT))
+      comp_keys = fim_comp.dt.strftime("%m%Y")
+      alvos=[]
+      for key in comp_keys.dropna().unique():
+        mask = comp_keys == key
+        kdf = norm.loc[mask].copy()
+        if kdf.empty: continue
+        alvos.append((int(key[:2]), int(key[2:]), kdf))
+
+    for mm_out, yyyy_out, part in alvos:
+      part = part.copy()
+      part["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = part["CONDUTOR_NORMALIZADO"]
+      for c in cols:
+        if c not in part.columns: part[c] = ""
+      part = part[cols].copy()
+      arq = _arquivo_historico_abastecimentos(mm_out, yyyy_out)
+      if os.path.exists(arq):
+        old = pd.read_csv(arq, dtype=str, encoding="utf-8-sig")
+        for c in cols:
+          if c not in old.columns: old[c] = ""
+        old = old[cols]
+      else:
+        old = pd.DataFrame(columns=cols)
+      old = pd.concat([old, part], ignore_index=True)
+      old = old.drop_duplicates(
+          subset=["PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","DATA_FILTRO","CONDUTOR_NORMALIZADO"],
+          keep="last",
+      )
+      old.to_csv(arq, index=False, encoding="utf-8-sig")
+
+def _carregar_historico_abastecimentos_total():
+  registros=[]
+  for nome in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR!="." else "."):
+    m=re.fullmatch(r"historico_abastecimentos_(\d{2})(\d{4})\.csv",nome,re.IGNORECASE)
+    if not m: continue
+    caminho=os.path.join(DATA_DIR if DATA_DIR and DATA_DIR!="." else ".",nome)
+    try:
+      df=pd.read_csv(caminho,dtype=str,encoding="utf-8-sig")
+      for c in _colunas_historico_abastecimentos():
+        if c not in df.columns: df[c]=""
+      for c in ["KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM"]: df[c]=df[c].apply(DataUtils.converter_numero)
+      df["REGISTRO_VALIDO"]=df["REGISTRO_VALIDO"].astype(str).str.lower().isin(["true","1","sim"])
+      df["DATA_FILTRO"]=df["DATA_FILTRO"].apply(parse_data_filtro)
+      df["DATA_NUM"]=df["DATA_FILTRO"]
+      df["DATA"]=df["DATA_FILTRO"]
+      df["DATA_HORA_ABASTECIMENTO"]=df["DATA_HORA_ABASTECIMENTO"].apply(_parse_datetime_flex)
+      registros.append(df[_colunas_historico_abastecimentos()])
+    except Exception as exc:
+      print(f"Erro ao carregar {nome}: {exc}")
+  if not registros: return pd.DataFrame()
+  return pd.concat(registros,ignore_index=True)
+
 ARQUIVO_USUARIOS_ACESSO = os.path.join(DATA_DIR, "usuarios_acesso.csv")
 
 VALOR_PONTO_POR_CATEGORIA = {
@@ -787,60 +968,68 @@ class AppConfig:
       })
       df_f.to_excel(self.CAMINHO_FROTA, index=False)
 
-    if not os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
-      df_a = pd.DataFrame({
-          "DATA": [
-              "01/08/2026",
-              "05/08/2026",
-              "10/08/2026",
-              "15/08/2026",
-              "01/08/2026",
-              "05/08/2026",
-              "10/08/2026",
-              "15/08/2026",
-          ],
-          "PLACA": [
-              "ABC1234",
-              "ABC1234",
-              "DEF5678",
-              "DEF5678",
-              "WES0001",
-              "WES0002",
-              "WES0003",
-              "WES0004",
-          ],
-          "MOTORISTA": [
-              "JOAO SILVA",
-              "JOAO SILVA",
-              "MARIA SOUZA",
-              "MARIA SOUZA",
-              "WESLEI",
-              "WESLEI",
-              "WESLEI",
-              "WESLEI",
-          ],
-          "KM": [1000, 1500, 2000, 2600, 100, 500, 1000, 1600],
-          "QTDE": [200, 180, 280, 270, 50, 100, 150, 200],
-          "VALOR": [
-              1200.0,
-              1080.0,
-              1680.0,
-              1620.0,
-              300.0,
-              600.0,
-              900.0,
-              1200.0,
-          ],
-      })
-      df_a.to_excel(self.CAMINHO_ABASTECIMENTOS, index=False)
+    # A base fictícia de abastecimentos só é criada quando não existe
+    # absolutamente nenhuma fonte real (legado, mensal ou histórico).
+    if (not os.path.isfile(self.CAMINHO_ABASTECIMENTOS)
+        and not _listar_arquivos_abastecimentos_mensais()
+        and not any(name.startswith("historico_abastecimentos_") and name.endswith(".csv")
+                    for name in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR != "." else "."))):
+          if not os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
+            df_a = pd.DataFrame({
+                "DATA": [
+                    "01/08/2026",
+                    "05/08/2026",
+                    "10/08/2026",
+                    "15/08/2026",
+                    "01/08/2026",
+                    "05/08/2026",
+                    "10/08/2026",
+                    "15/08/2026",
+                ],
+                "PLACA": [
+                    "ABC1234",
+                    "ABC1234",
+                    "DEF5678",
+                    "DEF5678",
+                    "WES0001",
+                    "WES0002",
+                    "WES0003",
+                    "WES0004",
+                ],
+                "MOTORISTA": [
+                    "JOAO SILVA",
+                    "JOAO SILVA",
+                    "MARIA SOUZA",
+                    "MARIA SOUZA",
+                    "WESLEI",
+                    "WESLEI",
+                    "WESLEI",
+                    "WESLEI",
+                ],
+                "KM": [1000, 1500, 2000, 2600, 100, 500, 1000, 1600],
+                "QTDE": [200, 180, 280, 270, 50, 100, 150, 200],
+                "VALOR": [
+                    1200.0,
+                    1080.0,
+                    1680.0,
+                    1620.0,
+                    300.0,
+                    600.0,
+                    900.0,
+                    1200.0,
+                ],
+            })
+            df_a.to_excel(self.CAMINHO_ABASTECIMENTOS, index=False)
 
   def verificar_arquivos(self):
     self.criar_arquivos_teste_se_ausentes()
     self.CAMINHO_PRECOS = self._resolver_caminho_real(self.CAMINHO_PRECOS)
     self.CAMINHO_FROTA = self._resolver_caminho_real(self.CAMINHO_FROTA)
-    self.CAMINHO_ABASTECIMENTOS = self._resolver_caminho_real(
-        self.CAMINHO_ABASTECIMENTOS
-    )
+    # O abastecimento pode vir do legado ou, preferencialmente, dos arquivos
+    # mensais abastecimentos_MMYYYY.xlsx. Não exigimos o legado quando já existe
+    # qualquer arquivo mensal ou histórico interno.
+    if os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
+      self.CAMINHO_ABASTECIMENTOS = self._resolver_caminho_real(self.CAMINHO_ABASTECIMENTOS)
 
 
 # ================================================================
@@ -3003,7 +3192,10 @@ def carregar_base(cache_token=None):
     precos = loader.carregar_precos()
     frota, mapa_frota = loader.carregar_frota()
     cadastro = loader.carregar_cadastro_motoristas()
-    abastecimentos = loader.carregar_abastecimentos(mapa_frota)
+    _arquivar_abastecimentos_mensais(mapa_frota)
+    abastecimentos = _carregar_historico_abastecimentos_total()
+    if abastecimentos.empty:
+      abastecimentos = loader.carregar_abastecimentos(mapa_frota)
     viagens = loader.carregar_viagens()
     abastecimentos = associar_motorista_viagem(abastecimentos, viagens)
     eventos = engine.calcular_eventos_consumo(abastecimentos)
@@ -3097,6 +3289,38 @@ def _motoristas_filial(df):
     if "MOTORISTA" in tmp.columns:
         return tmp[tmp["MOTORISTA"].fillna("").apply(DataUtils.normalizar_texto).isin(nomes)].copy()
     return tmp
+
+def filtrar_ausencias_competencia(df_ausencias, data_inicio_comp, data_fim_comp):
+    """Mostra somente afastamentos que tenham interseção com a competência 26-25.
+
+    Ex.: 04/08-25/08 aparece em agosto e não aparece em setembro.
+    Ex.: 04/08-02/09 aparece em agosto com 22 dias e em setembro com 8 dias.
+    """
+    if df_ausencias is None or df_ausencias.empty:
+        return pd.DataFrame(columns=list(df_ausencias.columns) if df_ausencias is not None else [])
+    ini = pd.Timestamp(data_inicio_comp).normalize()
+    fim = pd.Timestamp(data_fim_comp).normalize()
+    linhas=[]
+    for idx,row in df_ausencias.reset_index().rename(columns={"index":"_INDICE_ORIGINAL"}).iterrows():
+        di=parse_data_filtro(row.get("DATA_INICIO","")); df=parse_data_filtro(row.get("DATA_FIM",""))
+        if di is None: continue
+        di=pd.Timestamp(di).normalize()
+        if df is None:
+            n=pd.to_numeric(row.get("DIAS",0),errors="coerce")
+            try: n=int(n)
+            except Exception: n=0
+            if n<=0: continue
+            df=di+pd.Timedelta(days=n-1)
+        else: df=pd.Timestamp(df).normalize()
+        if df < di: continue
+        inter_ini=max(di,ini); inter_fim=min(df,fim)
+        if inter_ini <= inter_fim:
+            novo=row.copy()
+            novo["DIAS_COMPETENCIA"]=int((inter_fim-inter_ini).days+1)
+            novo["_INDICE_ORIGINAL"]=int(row["_INDICE_ORIGINAL"])
+            linhas.append(novo)
+    if not linhas: return pd.DataFrame(columns=list(df_ausencias.columns)+["DIAS_COMPETENCIA","_INDICE_ORIGINAL"])
+    return pd.DataFrame(linhas)
 
 def ausencia_label(i, row):
     return f"[{i}] {row.get('MOTORISTA','')} — {row.get('TIPO_AUSENCIA','')} — {row.get('DATA_INICIO','')} até {row.get('DATA_FIM','')} ({row.get('DIAS',0)} dias)"
@@ -3863,15 +4087,29 @@ with tabs[7]:
                 if ad<=0: st.error("Data final inválida")
                 else:
                     novo=pd.DataFrame([{"MOTORISTA":am,"TIPO_AUSENCIA":at,"DATA_INICIO":ai.strftime('%d/%m/%Y'),"DATA_FIM":af.strftime('%d/%m/%Y'),"DIAS":ad,"OBSERVACAO":ao}]); st.session_state.ausencias=pd.concat([st.session_state.ausencias,novo],ignore_index=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
-        st.dataframe(_motoristas_filial(st.session_state.ausencias),use_container_width=True,hide_index=True)
-        if not st.session_state.ausencias.empty:
-            opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
+        aus_comp = _motoristas_filial(filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim))
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.drop(columns=["_INDICE_ORIGINAL"], errors="ignore").copy()
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"], errors="ignore")
+            st.dataframe(aus_exib,use_container_width=True,hide_index=True)
+        else:
+            st.info("Nenhuma ausência incide nesta competência.")
+        if not aus_comp.empty:
+            opts=[ausencia_label(int(r.get("_INDICE_ORIGINAL",i)),r) for i,r in aus_comp.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
             if st.button("🗑️ Excluir registro selecionado",key="axx", disabled=(not is_admin)):
                 idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
     else:
         st.subheader("Ausências — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
-        st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
+        aus_comp = _motoristas_filial(filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim))
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.drop(columns=["_INDICE_ORIGINAL"], errors="ignore").copy()
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"], errors="ignore")
+            st.dataframe(aus_exib,use_container_width=True,hide_index=True)
+        else:
+            st.info("Nenhuma ausência incide nesta competência.")
 with tabs[10]:
     # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
     df_descl_comp = filtrar_desclassificacoes_competencia(
