@@ -243,111 +243,126 @@ def _normalizar_base_abastecimentos_raw(df, mapa_frota):
   return out
 
 def _colunas_historico_abastecimentos():
-  return ["PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM","CONDUTOR_NORMALIZADO","DATA_FILTRO","DATA_NUM","DATA","DATA_HORA_ABASTECIMENTO","TIPO","REGISTRO_VALIDO","MOTORISTA_ABASTECIMENTO_ORIGINAL"]
+  return ["ID_ABASTECIMENTO","_ORDEM_ORIGINAL","PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM","CONDUTOR_NORMALIZADO","DATA_FILTRO","DATA_NUM","DATA","DATA_HORA_ABASTECIMENTO","TIPO","REGISTRO_VALIDO","MOTORISTA_ABASTECIMENTO_ORIGINAL"]
 
 def _arquivar_abastecimentos_mensais(mapa_frota):
-  """Importa fontes mensais/legadas para um histórico interno por competência.
+  """Importa cada arquivo mensal para um histórico por competência.
 
-  Cada competência fica em um CSV separado (historico_abastecimentos_MMYYYY.csv),
-  evitando crescimento de uma única planilha. A importação é idempotente.
+  Regras:
+  - O arquivo mensal da competência é a fonte oficial daquela competência.
+  - Ao existir o Excel mensal, o histórico daquela competência é RECONSTRUÍDO
+    (não concatenado), evitando duplicações e resíduos de versões anteriores.
+  - O histórico de competências anteriores permanece salvo mesmo que o Excel
+    correspondente seja removido da hospedagem.
+  - Cada linha recebe ID_ABASTECIMENTO único por competência/arquivo.
   """
   garantir_diretorio()
   cols = _colunas_historico_abastecimentos()
-  fontes = []
 
-  # Migração única do arquivo antigo consolidado, se ele ainda existir.
-  if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO):
-    fontes.append((None, None, ARQUIVO_ABASTECIMENTOS_LEGADO, True))
-
-  # Arquivos mensais: abastecimentos_072026.xlsx, abastecimentos_082026.xlsx, ...
-  for mm,yyyy,caminho in _listar_arquivos_abastecimentos_mensais():
-    fontes.append((mm,yyyy,caminho,False))
-
-  for mm,yyyy,caminho,e_legado in fontes:
+  # Primeiro, processa os arquivos mensais presentes.
+  mensal_processados = set()
+  for mm, yyyy, caminho in _listar_arquivos_abastecimentos_mensais():
     raw = _ler_planilha_abastecimentos_generica(caminho)
     norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
     if norm.empty or "DATA_FILTRO" not in norm.columns:
       continue
 
-    datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce")
-    norm = norm.loc[datas.notna()].copy()
+    datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+    fim_comp = pd.Timestamp(year=yyyy, month=mm, day=25).normalize()
+    ini_comp = (fim_comp - pd.DateOffset(months=1)).replace(day=26).normalize()
+    norm = norm.loc[datas.notna() & (datas >= ini_comp) & (datas <= fim_comp)].copy()
     if norm.empty:
+      # Se o arquivo mensal estiver vazio/incompatível, não destrói um histórico já válido.
       continue
 
-    if not e_legado:
-      fim_comp = pd.Timestamp(year=yyyy, month=mm, day=25).normalize()
-      ini_comp = (fim_comp - pd.DateOffset(months=1)).replace(day=26).normalize()
-      datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
-      norm = norm.loc[(datas >= ini_comp) & (datas <= fim_comp)].copy()
-      if norm.empty:
-        continue
-      alvos = [(mm,yyyy,norm)]
-    else:
-      # Divide o legado pelas competências reais encontradas nos registros.
-      dt = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
-      fim_comp = dt.apply(lambda d: (d + pd.DateOffset(months=1)).replace(day=25) if pd.notna(d) and d.day >= 26 else (d.replace(day=25) if pd.notna(d) else pd.NaT))
-      comp_keys = fim_comp.dt.strftime("%m%Y")
-      alvos=[]
-      for key in comp_keys.dropna().unique():
-        mask = comp_keys == key
-        kdf = norm.loc[mask].copy()
-        if kdf.empty: continue
-        alvos.append((int(key[:2]), int(key[2:]), kdf))
+    norm["ID_ABASTECIMENTO"] = [
+        f"{yyyy:04d}{mm:02d}-{int(i):06d}"
+        for i in norm["_ORDEM_ORIGINAL"].fillna(0).astype(int)
+    ]
+    norm["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = norm["CONDUTOR_NORMALIZADO"]
 
-    for mm_out, yyyy_out, part in alvos:
-      part = part.copy()
-      part["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = part["CONDUTOR_NORMALIZADO"]
-      if "_ORDEM_ORIGINAL" not in part.columns:
-        part["_ORDEM_ORIGINAL"] = np.arange(len(part))
-      for c in cols:
-        if c not in part.columns: part[c] = ""
-      part = part[cols].copy()
-      arq = _arquivo_historico_abastecimentos(mm_out, yyyy_out)
-      if os.path.exists(arq):
-        old = pd.read_csv(arq, dtype=str, encoding="utf-8-sig")
-        for c in cols:
-          if c not in old.columns: old[c] = ""
-        old = old[cols]
-      else:
-        old = pd.DataFrame(columns=cols)
-      old = pd.concat([old, part], ignore_index=True)
-      old = old.drop_duplicates(
-          subset=["PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","DATA_FILTRO","CONDUTOR_NORMALIZADO"],
-          keep="last",
-      )
-      old.to_csv(arq, index=False, encoding="utf-8-sig")
+    for c in cols:
+      if c not in norm.columns:
+        norm[c] = ""
+    part = norm[cols].copy()
+
+    arq = _arquivo_historico_abastecimentos(mm, yyyy)
+    # Fonte mensal substitui completamente o snapshot anterior da mesma competência.
+    part.to_csv(arq, index=False, encoding="utf-8-sig")
+    mensal_processados.add((mm, yyyy))
+
+  # Migração do legado somente para competências ainda sem histórico mensal.
+  if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO):
+    raw = _ler_planilha_abastecimentos_generica(ARQUIVO_ABASTECIMENTOS_LEGADO)
+    norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
+    if not norm.empty and "DATA_FILTRO" in norm.columns:
+      datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+      norm = norm.loc[datas.notna()].copy()
+      if not norm.empty:
+        fim_comp = datas.apply(
+            lambda d: ((d + pd.DateOffset(months=1)).replace(day=25)
+                       if pd.notna(d) and d.day >= 26
+                       else (d.replace(day=25) if pd.notna(d) else pd.NaT))
+        )
+        comp_keys = fim_comp.dt.strftime("%m%Y")
+        for key in comp_keys.dropna().unique():
+          mm, yyyy = int(key[:2]), int(key[2:])
+          if (mm, yyyy) in mensal_processados:
+            continue
+          arq = _arquivo_historico_abastecimentos(mm, yyyy)
+          # Não reprocessa o legado sobre um histórico já consolidado.
+          if os.path.exists(arq):
+            continue
+          mask = comp_keys == key
+          part = norm.loc[mask].copy()
+          if part.empty:
+            continue
+          part["ID_ABASTECIMENTO"] = [
+              f"LEGACY-{yyyy:04d}{mm:02d}-{int(i):06d}"
+              for i in part["_ORDEM_ORIGINAL"].fillna(0).astype(int)
+          ]
+          part["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = part["CONDUTOR_NORMALIZADO"]
+          for c in cols:
+            if c not in part.columns:
+              part[c] = ""
+          part[cols].to_csv(arq, index=False, encoding="utf-8-sig")
 
 def _carregar_historico_abastecimentos_total():
   registros=[]
-  for nome in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR!="." else "."):
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR!="." else "."
+  for nome in os.listdir(diretorio):
     m=re.fullmatch(r"historico_abastecimentos_(\d{2})(\d{4})\.csv",nome,re.IGNORECASE)
-    if not m: continue
-    caminho=os.path.join(DATA_DIR if DATA_DIR and DATA_DIR!="." else ".",nome)
+    if not m:
+      continue
+    mm, yyyy = int(m.group(1)), int(m.group(2))
+    caminho=os.path.join(diretorio,nome)
     try:
       df=pd.read_csv(caminho,dtype=str,encoding="utf-8-sig")
       for c in _colunas_historico_abastecimentos():
         if c not in df.columns: df[c]=""
-      for c in ["KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM"]: df[c]=df[c].apply(DataUtils.converter_numero)
+      df["_ORDEM_ORIGINAL"] = pd.to_numeric(df["_ORDEM_ORIGINAL"], errors="coerce").fillna(
+          pd.Series(range(len(df)), index=df.index)
+      ).astype(int)
+      # Histórico antigo sem ID: gera identificador único usando competência + posição.
+      idv = df["ID_ABASTECIMENTO"].fillna("").astype(str).str.strip()
+      falt = idv.eq("")
+      if falt.any():
+        df.loc[falt, "ID_ABASTECIMENTO"] = [
+            f"{yyyy:04d}{mm:02d}-{i:06d}" for i in df.index[falt]
+        ]
+      for c in ["KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM"]:
+        df[c]=df[c].apply(DataUtils.converter_numero)
       df["REGISTRO_VALIDO"]=df["REGISTRO_VALIDO"].astype(str).str.lower().isin(["true","1","sim"])
       df["DATA_FILTRO"]=df["DATA_FILTRO"].apply(parse_data_filtro)
       df["DATA_NUM"]=df["DATA_FILTRO"]
       df["DATA"]=df["DATA_FILTRO"]
       df["DATA_HORA_ABASTECIMENTO"]=df["DATA_HORA_ABASTECIMENTO"].apply(_parse_datetime_flex)
-      # O histórico mensal precisa fornecer também a ordem original usada pelo
-      # cálculo do KM anterior. Bases antigas não possuem esse campo, então
-      # recriamos uma ordem estável por arquivo.
-      df["_ORDEM_ORIGINAL"] = np.arange(len(df))
-      registros.append(df[_colunas_historico_abastecimentos() + ["_ORDEM_ORIGINAL"]])
+      registros.append(df[_colunas_historico_abastecimentos()])
     except Exception as exc:
       print(f"Erro ao carregar {nome}: {exc}")
-  if not registros: return pd.DataFrame()
-  combinado = pd.concat(registros,ignore_index=True)
-  # Garante identificador único e estável em todo o histórico consolidado.
-  if "_ORDEM_ORIGINAL" not in combinado.columns:
-    combinado["_ORDEM_ORIGINAL"] = np.arange(len(combinado))
-  else:
-    combinado["_ORDEM_ORIGINAL"] = np.arange(len(combinado))
-  return combinado
+  if not registros:
+    return pd.DataFrame()
+  return pd.concat(registros,ignore_index=True)
 
 ARQUIVO_USUARIOS_ACESSO = os.path.join(DATA_DIR, "usuarios_acesso.csv")
 
@@ -3192,12 +3207,16 @@ _migracao_cadastro_count = migrar_cadastro_legado_uma_vez()
 _CACHE_BASE_TOKEN = (
     _mtime_arquivo("Pasta2.xlsx"),
     _mtime_arquivo("frota.xlsx"),
-    _mtime_arquivo("uah_abastecimentos_3.xlsx"),
-    _mtime_arquivo("Pasta2.XLSX"),
-    _mtime_arquivo("frota.XLSX"),
-    _mtime_arquivo("uah_abastecimentos_3.XLSX"),
+    _token_arquivos_abastecimentos_mensais(),
     _token_arquivos_viagens(),
     _token_arquivos_velocidade(),
+    tuple(
+        (nome, _mtime_arquivo(os.path.join(DATA_DIR if DATA_DIR and DATA_DIR != "." else ".", nome)))
+        for nome in sorted([
+            n for n in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR != "." else ".")
+            if re.fullmatch(r"historico_abastecimentos_\d{2}\d{4}\.csv", n, flags=re.IGNORECASE)
+        ])
+    ),
 )
 
 @st.cache_resource(show_spinner=False)
@@ -3539,13 +3558,13 @@ with tabs[1]:
     # outras filiais/motoristas com o resumo atual.
     evt_resumo = eventos.copy() if eventos is not None else pd.DataFrame()
     if not evt_resumo.empty and det_view is not None and not det_view.empty:
-        if "_ORDEM_ORIGINAL" in evt_resumo.columns and "_ORDEM_ORIGINAL" in det_view.columns:
-            ids_periodo = set(pd.to_numeric(det_view["_ORDEM_ORIGINAL"], errors="coerce").dropna().astype(int).tolist())
+        if "ID_ABASTECIMENTO" in evt_resumo.columns and "ID_ABASTECIMENTO" in det_view.columns:
+            ids_periodo = set(det_view["ID_ABASTECIMENTO"].fillna("").astype(str).tolist())
             evt_resumo = evt_resumo[
-                pd.to_numeric(evt_resumo["_ORDEM_ORIGINAL"], errors="coerce").isin(ids_periodo)
+                evt_resumo["ID_ABASTECIMENTO"].fillna("").astype(str).isin(ids_periodo)
             ].copy()
         else:
-            # Fallback para bases antigas sem o identificador original.
+            # Fallback para bases antigas.
             evt_resumo = aplicar_periodo(evt_resumo) if 'aplicar_periodo' in globals() else evt_resumo
 
     ab_km = 0.0
