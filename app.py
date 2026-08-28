@@ -45,6 +45,103 @@ def _token_arquivos_viagens():
       token.append((caminho, 0.0, 0))
   return tuple(token)
 
+
+def _listar_arquivos_velocidade():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  padrao = r"Extrato\s+de\s+Velocidade\s+excedida\s+\d{2}-\d{2}\s+a\s+\d{2}-\d{2}(?:\s+\d{4})?\.(xlsx|xlsm|xls)$"
+  for nome in nomes:
+    if re.fullmatch(padrao, nome, flags=re.IGNORECASE):
+      encontrados.append(os.path.join(diretorio, nome))
+  return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
+
+def _token_arquivos_velocidade():
+  token = []
+  for caminho in _listar_arquivos_velocidade():
+    try:
+      token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError:
+      token.append((caminho, 0.0, 0))
+  return tuple(token)
+
+def _extrair_periodo_nome_velocidade(nome_arquivo):
+  nome = os.path.basename(nome_arquivo)
+  m = re.search(r"(\d{2})-(\d{2})\s+a\s+(\d{2})-(\d{2})", nome)
+  if not m:
+    return None
+  return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+def carregar_excesso_velocidade_automatico(dt_ini, dt_fim):
+  """Lê o extrato mensal correspondente à competência selecionada.
+
+  A planilha possui a aba 'Geral' com Motorista, Filial e Picos de Velocidade.
+  A competência é identificada pelos dias/meses no nome do arquivo, então o ano
+  pode variar sem exigir alteração do código.
+  """
+  try:
+    di = pd.Timestamp(dt_ini).date()
+    df = pd.Timestamp(dt_fim).date()
+  except Exception:
+    return pd.DataFrame()
+
+  alvo = (di.day, di.month, df.day, df.month)
+  arquivos = []
+  for caminho in _listar_arquivos_velocidade():
+    periodo = _extrair_periodo_nome_velocidade(caminho)
+    if periodo == alvo:
+      arquivos.append(caminho)
+
+  if not arquivos:
+    return pd.DataFrame()
+
+  caminho = arquivos[-1]
+  try:
+    bruto = pd.read_excel(caminho, sheet_name="Geral", engine="openpyxl", header=None, dtype=object)
+  except Exception as exc:
+    print(f"Erro ao ler extrato de velocidade {os.path.basename(caminho)}: {exc}")
+    return pd.DataFrame()
+
+  if bruto.empty:
+    return pd.DataFrame()
+
+  # Localiza a linha de cabeçalho que contém Motoristas/Filial/Picos de Velocidade.
+  cab_idx = None
+  cab = None
+  for i in range(min(len(bruto), 20)):
+    vals = [DataUtils.normalizar_texto(v) for v in bruto.iloc[i].tolist()]
+    if "MOTORISTAS" in vals and "FILIAL" in vals and "PICOS DE VELOCIDADE" in vals:
+      cab_idx = i
+      cab = vals
+      break
+  if cab_idx is None:
+    return pd.DataFrame()
+
+  idx_mot = cab.index("MOTORISTAS")
+  idx_fil = cab.index("FILIAL")
+  idx_evt = cab.index("PICOS DE VELOCIDADE")
+
+  dados = bruto.iloc[cab_idx + 1 :].copy()
+  out = pd.DataFrame({
+      "MOTORISTA": dados.iloc[:, idx_mot].apply(DataUtils.normalizar_texto),
+      "FILIAL": dados.iloc[:, idx_fil].apply(DataUtils.normalizar_texto),
+      "EVENTOS": pd.to_numeric(dados.iloc[:, idx_evt], errors="coerce").fillna(0),
+  })
+  out["EVENTOS"] = out["EVENTOS"].astype(int)
+  out = out[(out["MOTORISTA"] != "") & (out["EVENTOS"] > 0)].copy()
+  if out.empty:
+    return pd.DataFrame()
+
+  out["CATEGORIA"] = ""
+  out["DATA_EVENTO"] = pd.Timestamp(df).strftime("%d/%m/%Y")
+  out["OBSERVACAO"] = "Importado automaticamente do extrato mensal"
+  out["FONTE_EVENTO"] = "EXTRATO_VELOCIDADE"
+  out["ARQUIVO_FONTE"] = os.path.basename(caminho)
+  return out[["MOTORISTA","CATEGORIA","DATA_EVENTO","EVENTOS","OBSERVACAO","FONTE_EVENTO","ARQUIVO_FONTE"]].reset_index(drop=True)
+
 ARQUIVO_AUSENCIAS = os.path.join(DATA_DIR, "ausencias.csv")
 ARQUIVO_DESCLASSIFICACOES = os.path.join(DATA_DIR, "desclassificacoes.csv")
 ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv")
@@ -2896,6 +2993,7 @@ _CACHE_BASE_TOKEN = (
     _mtime_arquivo("frota.XLSX"),
     _mtime_arquivo("uah_abastecimentos_3.XLSX"),
     _token_arquivos_viagens(),
+    _token_arquivos_velocidade(),
 )
 
 @st.cache_resource(show_spinner=False)
@@ -2938,10 +3036,13 @@ def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
     di = dt_ini.strftime('%d/%m/%Y') if isinstance(dt_ini, date) else str(dt_ini)
     df = dt_fim.strftime('%d/%m/%Y') if isinstance(dt_fim, date) else str(dt_fim)
     base = aplicar_filtros(di, df, motorista, placa, categoria, filial, st.session_state.ausencias, st.session_state.desclassificacoes, st.session_state.mapa_cat_custom)
+
     def _eventos_no_periodo(df_eventos):
         if df_eventos is None or df_eventos.empty:
             return df_eventos
         tmp = df_eventos.copy()
+        if "DATA_EVENTO" not in tmp.columns:
+            return pd.DataFrame()
         datas = tmp["DATA_EVENTO"].apply(parse_data_filtro)
         ini = pd.Timestamp(dt_ini).normalize() if isinstance(dt_ini, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_ini)
         fim = pd.Timestamp(dt_fim).normalize() if isinstance(dt_fim, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_fim)
@@ -2951,11 +3052,40 @@ def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
         if fim is not None and pd.notna(fim):
             mask &= datas <= pd.Timestamp(fim).normalize()
         return tmp.loc[mask].copy()
-    return recalcular_saida_dashboard(
-        base,
-        _eventos_no_periodo(st.session_state.excesso_velocidade),
-        _eventos_no_periodo(st.session_state.controle_jornada),
-    )
+
+    # EXCESSO DE VELOCIDADE: o extrato oficial da competência substitui
+    # os lançamentos manuais daquela competência quando encontrado.
+    automatico = carregar_excesso_velocidade_automatico(dt_ini, dt_fim)
+    if automatico is not None and not automatico.empty:
+        auto = automatico.copy()
+        # A categoria do desconto segue a categoria calculada para o motorista.
+        mapa_cat = {}
+        if len(base) > 0 and isinstance(base[-1], pd.DataFrame) and not base[-1].empty:
+            rr = base[-1].copy()
+            if "MOTORISTA" in rr.columns and "CATEGORIA" in rr.columns:
+                mapa_cat = {DataUtils.normalizar_texto(m): normalizar_categoria_evento(c)
+                            for m,c in zip(rr["MOTORISTA"], rr["CATEGORIA"]) if str(m).strip()}
+        if "CATEGORIA" not in auto.columns:
+            auto["CATEGORIA"] = ""
+        auto["CATEGORIA"] = auto["MOTORISTA"].map(mapa_cat).fillna("")
+        # Fallback para o cadastro oficial, caso o motorista não esteja no resumo.
+        if "CATEGORIA" in auto.columns:
+            mapa_cad = {}
+            try:
+                for _,r in cadastro.iterrows():
+                    mapa_cad[DataUtils.normalizar_texto(r.get("MOTORISTA_CADASTRO",""))] = normalizar_categoria_evento(r.get("TIPO_CADASTRO",""))
+            except Exception:
+                mapa_cad = {}
+            auto["CATEGORIA"] = auto.apply(
+                lambda r: r["CATEGORIA"] if str(r.get("CATEGORIA"," ")).strip() else mapa_cad.get(DataUtils.normalizar_texto(r.get("MOTORISTA","")), ""),
+                axis=1,
+            )
+        df_excesso = auto
+    else:
+        df_excesso = _eventos_no_periodo(st.session_state.excesso_velocidade)
+
+    df_jornada = _eventos_no_periodo(st.session_state.controle_jornada)
+    return recalcular_saida_dashboard(base, df_excesso, df_jornada)
 
 
 def _motoristas_filial(df):
@@ -3964,11 +4094,19 @@ if is_admin:
                     st.success("Usuário atualizado.")
                     st.rerun()
 
-def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False):
+def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False, df_automatico=None):
     with tab:
         st.subheader(titulo)
         if not is_admin:
             st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de eventos são exclusivos do Administrador.")
+            if is_excesso and df_automatico is not None and not df_automatico.empty:
+                ex_auto = df_automatico.copy()
+                ex_auto["VALOR/EVENTO"] = ex_auto.get("CATEGORIA", pd.Series(index=ex_auto.index)).apply(valor_ponto_categoria)
+                ex_auto["DESCONTO"] = pd.to_numeric(ex_auto["EVENTOS"], errors="coerce").fillna(0) * ex_auto["VALOR/EVENTO"]
+                for _c in ["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]:
+                    if _c not in ex_auto.columns: ex_auto[_c] = ""
+                st.dataframe(ex_auto[["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]], use_container_width=True, hide_index=True)
+                return
             df_at = st.session_state[df_key].copy()
             if df_at.empty:
                 st.info("Nenhum lançamento registrado.")
@@ -3980,6 +4118,26 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             return
         else:
             st.info(info)
+            if is_excesso and df_automatico is not None and not df_automatico.empty:
+                st.success(f"✅ Extrato automático carregado: {len(df_automatico)} motoristas com eventos na competência {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}.")
+                ex_auto = df_automatico.copy()
+                ex_auto["VALOR/EVENTO"] = ex_auto["MOTORISTA"].map(
+                    res_f.set_index(res_f["MOTORISTA"].map(DataUtils.normalizar_texto))["CATEGORIA"].to_dict()
+                    if not res_f.empty else {}
+                ).map(valor_ponto_categoria).fillna(0.0)
+                ex_auto["DESCONTO"] = ex_auto["EVENTOS"] * ex_auto["VALOR/EVENTO"]
+                ex_auto["VALOR/EVENTO"] = ex_auto["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+                ex_auto["DESCONTO"] = ex_auto["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+                # Algumas versões do extrato/arquivo podem não trazer todos os
+                # campos auxiliares. Exibe somente as colunas existentes,
+                # evitando KeyError e mantendo a importação automática.
+                colunas_auto = ["MOTORISTA", "FILIAL", "EVENTOS", "VALOR/EVENTO", "DESCONTO", "ARQUIVO_FONTE"]
+                for _c in colunas_auto:
+                    if _c not in ex_auto.columns:
+                        ex_auto[_c] = ""
+                st.dataframe(ex_auto[colunas_auto], use_container_width=True, hide_index=True)
+                st.caption("Os eventos acima são usados automaticamente no cálculo do prêmio. O lançamento manual fica disponível apenas como fallback quando não houver extrato para a competência.")
+                return
             st.caption("TRUCK R$ 1,40 | BITRUCK R$ 1,63 | CARRETA R$ 1,87 | BITREM R$ 2,10 | RODOTREM/RODOENTREGA R$ 2,45")
             mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
             if mots:
@@ -4019,7 +4177,8 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
 _render_eventos_pilar(
     tabs[8], "🚨 Excesso de Velocidade",
     "Até 30 eventos: desconto por evento. Mais de 30 eventos no período: perda integral do prêmio.",
-    "excesso", "excesso_velocidade", salvar_excesso_velocidade, True
+    "excesso", "excesso_velocidade", salvar_excesso_velocidade, True,
+    df_automatico=carregar_excesso_velocidade_automatico(dt_ini, dt_fim)
 )
 _render_eventos_pilar(
     tabs[9], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
