@@ -731,30 +731,12 @@ def aplicar_descontos_eventos(df_resumo: pd.DataFrame, df_excesso: pd.DataFrame,
         return res
     for c in ["EVENTOS_EXCESSO_VELOCIDADE","DESCONTO_EXCESSO_VELOCIDADE","EVENTOS_CONTROLE_JORNADA","DESCONTO_CONTROLE_JORNADA"]:
         res[c] = 0
-
-    # Fonte oficial da categoria para os eventos: resultado do cálculo do motorista.
-    # Isso evita VALOR/EVENTO = R$ 0,00 quando o extrato automático não traz categoria.
-    mapa_categoria = {}
-    if "MOTORISTA" in res.columns and "CATEGORIA" in res.columns:
-        for _, rr in res[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
-            chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
-            categoria = DataUtils.normalizar_texto(rr["CATEGORIA"])
-            if chave and categoria:
-                mapa_categoria[chave] = categoria
-
     for df, prefix in [(df_excesso, "EXCESSO"), (df_jornada, "JORNADA")]:
         if df is None or df.empty:
             continue
         tmp = df.copy()
         tmp["MOTORISTA_N"] = tmp["MOTORISTA"].apply(DataUtils.normalizar_texto)
         tmp["EVENTOS"] = pd.to_numeric(tmp["EVENTOS"], errors="coerce").fillna(0)
-        if "CATEGORIA" not in tmp.columns:
-            tmp["CATEGORIA"] = ""
-        tmp["CATEGORIA"] = tmp.apply(
-            lambda r: r["CATEGORIA"] if DataUtils.normalizar_texto(r.get("CATEGORIA", ""))
-            else mapa_categoria.get(r["MOTORISTA_N"], ""),
-            axis=1,
-        )
         tmp["VALOR_PONTO"] = tmp["CATEGORIA"].apply(valor_ponto_categoria)
         tmp["DESCONTO"] = tmp["EVENTOS"] * tmp["VALOR_PONTO"]
         agg = tmp.groupby("MOTORISTA_N").agg(EVENTOS=("EVENTOS","sum"), DESCONTO=("DESCONTO","sum"))
@@ -4463,22 +4445,7 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de eventos são exclusivos do Administrador.")
             if is_excesso and df_automatico is not None and not df_automatico.empty:
                 ex_auto = df_automatico.copy()
-                # O extrato oficial traz motorista/filial/eventos, mas pode não trazer categoria.
-                # Busca a categoria no resultado consolidado do motorista.
-                if "CATEGORIA" not in ex_auto.columns:
-                    ex_auto["CATEGORIA"] = ""
-                mapa_cat_ex = {}
-                if "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
-                    mapa_cat_ex = {
-                        DataUtils.normalizar_texto(r["MOTORISTA"]): DataUtils.normalizar_texto(r["CATEGORIA"])
-                        for _, r in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows()
-                        if DataUtils.normalizar_texto(r["CATEGORIA"])
-                    }
-                ex_auto["CATEGORIA"] = ex_auto.apply(
-                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
-                    axis=1,
-                )
-                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].apply(valor_ponto_categoria)
+                ex_auto["VALOR/EVENTO"] = ex_auto.get("CATEGORIA", pd.Series(index=ex_auto.index)).apply(valor_ponto_categoria)
                 ex_auto["DESCONTO"] = pd.to_numeric(ex_auto["EVENTOS"], errors="coerce").fillna(0) * ex_auto["VALOR/EVENTO"]
                 for _c in ["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]:
                     if _c not in ex_auto.columns: ex_auto[_c] = ""
@@ -4498,19 +4465,10 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             if is_excesso and df_automatico is not None and not df_automatico.empty:
                 st.success(f"✅ Extrato automático carregado: {len(df_automatico)} motoristas com eventos na competência {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}.")
                 ex_auto = df_automatico.copy()
-                mapa_cat_ex = {}
-                if not res_f.empty and "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
-                    for _, rr in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
-                        chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
-                        catv = DataUtils.normalizar_texto(rr["CATEGORIA"])
-                        if chave and catv:
-                            mapa_cat_ex[chave] = catv
-                ex_auto["CATEGORIA"] = ex_auto.get("CATEGORIA", "")
-                ex_auto["CATEGORIA"] = ex_auto.apply(
-                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
-                    axis=1,
-                )
-                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].map(valor_ponto_categoria).fillna(0.0)
+                ex_auto["VALOR/EVENTO"] = ex_auto["MOTORISTA"].map(
+                    res_f.set_index(res_f["MOTORISTA"].map(DataUtils.normalizar_texto))["CATEGORIA"].to_dict()
+                    if not res_f.empty else {}
+                ).map(valor_ponto_categoria).fillna(0.0)
                 ex_auto["DESCONTO"] = ex_auto["EVENTOS"] * ex_auto["VALOR/EVENTO"]
                 ex_auto["VALOR/EVENTO"] = ex_auto["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
                 ex_auto["DESCONTO"] = ex_auto["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
