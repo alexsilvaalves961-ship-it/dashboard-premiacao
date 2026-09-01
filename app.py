@@ -153,6 +153,7 @@ ARQUIVO_DATAS_MOTORISTAS = os.path.join(DATA_DIR, "datas_motoristas.csv")
 ARQUIVO_CODIGOS_FUNCIONAIS = os.path.join(DATA_DIR, "codigos_funcionais.csv")
 ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
 ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
+ARQUIVO_VALIDACOES_VIAGEM = os.path.join(DATA_DIR, "validacoes_abastecimento_viagem.csv")
 
 # Abastecimentos mensais: arquivos do tipo abastecimentos_MMYYYY.xlsx
 # O sistema arquiva internamente cada competência em um CSV separado, evitando
@@ -731,30 +732,12 @@ def aplicar_descontos_eventos(df_resumo: pd.DataFrame, df_excesso: pd.DataFrame,
         return res
     for c in ["EVENTOS_EXCESSO_VELOCIDADE","DESCONTO_EXCESSO_VELOCIDADE","EVENTOS_CONTROLE_JORNADA","DESCONTO_CONTROLE_JORNADA"]:
         res[c] = 0
-
-    # Fonte oficial da categoria para os eventos: resultado do cálculo do motorista.
-    # Isso evita VALOR/EVENTO = R$ 0,00 quando o extrato automático não traz categoria.
-    mapa_categoria = {}
-    if "MOTORISTA" in res.columns and "CATEGORIA" in res.columns:
-        for _, rr in res[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
-            chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
-            categoria = DataUtils.normalizar_texto(rr["CATEGORIA"])
-            if chave and categoria:
-                mapa_categoria[chave] = categoria
-
     for df, prefix in [(df_excesso, "EXCESSO"), (df_jornada, "JORNADA")]:
         if df is None or df.empty:
             continue
         tmp = df.copy()
         tmp["MOTORISTA_N"] = tmp["MOTORISTA"].apply(DataUtils.normalizar_texto)
         tmp["EVENTOS"] = pd.to_numeric(tmp["EVENTOS"], errors="coerce").fillna(0)
-        if "CATEGORIA" not in tmp.columns:
-            tmp["CATEGORIA"] = ""
-        tmp["CATEGORIA"] = tmp.apply(
-            lambda r: r["CATEGORIA"] if DataUtils.normalizar_texto(r.get("CATEGORIA", ""))
-            else mapa_categoria.get(r["MOTORISTA_N"], ""),
-            axis=1,
-        )
         tmp["VALOR_PONTO"] = tmp["CATEGORIA"].apply(valor_ponto_categoria)
         tmp["DESCONTO"] = tmp["EVENTOS"] * tmp["VALOR_PONTO"]
         agg = tmp.groupby("MOTORISTA_N").agg(EVENTOS=("EVENTOS","sum"), DESCONTO=("DESCONTO","sum"))
@@ -1684,8 +1667,57 @@ class DataLoader:
 
 
 # ================================================================
-# VALIDAÇÃO DO MOTORISTA PELO HISTÓRICO DE VIAGENS
+# VALIDAÇÕES MANUAIS DE ABASTECIMENTOS
 # ================================================================
+def carregar_validacoes_abastecimento_viagem() -> pd.DataFrame:
+  cols = ["ID_ABASTECIMENTO", "MOTORISTA_CORRETO", "OBSERVACAO", "DATA_VALIDACAO"]
+  if not os.path.exists(ARQUIVO_VALIDACOES_VIAGEM):
+    return pd.DataFrame(columns=cols)
+  try:
+    df = pd.read_csv(ARQUIVO_VALIDACOES_VIAGEM, dtype=str, encoding="utf-8-sig")
+    for c in cols:
+      if c not in df.columns:
+        df[c] = ""
+    return df[cols].fillna("")
+  except Exception as exc:
+    print(f"Erro ao carregar validações manuais: {exc}")
+    return pd.DataFrame(columns=cols)
+
+def salvar_validacoes_abastecimento_viagem(df: pd.DataFrame):
+  try:
+    garantir_diretorio()
+    cols = ["ID_ABASTECIMENTO", "MOTORISTA_CORRETO", "OBSERVACAO", "DATA_VALIDACAO"]
+    out = df.copy() if df is not None else pd.DataFrame(columns=cols)
+    for c in cols:
+      if c not in out.columns:
+        out[c] = ""
+    out[cols].fillna("").drop_duplicates("ID_ABASTECIMENTO", keep="last").to_csv(
+        ARQUIVO_VALIDACOES_VIAGEM, index=False, encoding="utf-8-sig"
+    )
+  except Exception as exc:
+    print(f"Erro ao salvar validações manuais: {exc}")
+
+def aplicar_validacoes_manuais_viagem(abastecimentos: pd.DataFrame, validacoes: pd.DataFrame) -> pd.DataFrame:
+  base = abastecimentos.copy()
+  if base.empty or validacoes is None or validacoes.empty or "ID_ABASTECIMENTO" not in base.columns:
+    return base
+  mapa = {}
+  for _, r in validacoes.iterrows():
+    k = str(r.get("ID_ABASTECIMENTO", "")).strip()
+    m = DataUtils.normalizar_texto(r.get("MOTORISTA_CORRETO", ""))
+    if k and m:
+      mapa[k] = m
+  if not mapa:
+    return base
+  ids = base["ID_ABASTECIMENTO"].fillna("").astype(str).str.strip()
+  mask = ids.isin(mapa.keys())
+  if mask.any():
+    base.loc[mask, "MOTORISTA_CONSIDERADO"] = ids[mask].map(mapa)
+    base.loc[mask, "MOTORISTA_VIAGEM"] = ids[mask].map(mapa)
+    base.loc[mask, "STATUS_VALIDACAO_VIAGEM"] = "VALIDADO MANUALMENTE"
+  base["CONDUTOR_NORMALIZADO"] = base["MOTORISTA_CONSIDERADO"].apply(DataUtils.normalizar_texto)
+  return base
+
 def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFrame) -> pd.DataFrame:
   """Concilia cada abastecimento com o ciclo de viagens entre dois abastecimentos.
 
@@ -1731,6 +1763,21 @@ def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFram
   viagens["VIAGEM_DATA_INICIO"] = viagens["VIAGEM_DATA_INICIO"].apply(_parse_datetime_flex)
   viagens["VIAGEM_DATA_FIM"] = viagens["VIAGEM_DATA_FIM"].apply(_parse_datetime_flex)
   por_placa = {placa: grp for placa, grp in viagens.groupby("PLACA_VIAGEM", sort=False)}
+
+  # Placa habitual: definida pela maior frequência histórica do motorista no abastecimento.
+  # Em caso de empate, prefere a placa com maior quantidade total de litros.
+  habit_counts = (
+      base[base["MOTORISTA_ABASTECIMENTO_ORIGINAL"].str.strip() != ""]
+      .groupby(["MOTORISTA_ABASTECIMENTO_ORIGINAL", "PLACA_PADRONIZADA"], dropna=False)
+      .agg(QTD=("ID_ABASTECIMENTO", "count"), LITROS=("QTDE_NUM", "sum"))
+      .reset_index()
+      .sort_values(["MOTORISTA_ABASTECIMENTO_ORIGINAL", "QTD", "LITROS", "PLACA_PADRONIZADA"], ascending=[True, False, False, True], kind="stable")
+  )
+  placa_habitual = {}
+  for _, r in habit_counts.iterrows():
+    m = DataUtils.normalizar_texto(r["MOTORISTA_ABASTECIMENTO_ORIGINAL"])
+    if m and m not in placa_habitual:
+      placa_habitual[m] = str(r["PLACA_PADRONIZADA"]).strip()
 
   # A sequência por placa é a referência do ciclo. Ordenamos todas as linhas para
   # encontrar o abastecimento imediatamente anterior, inclusive de outra competência.
@@ -1795,6 +1842,27 @@ def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFram
 
       if cand.empty:
         base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO NO CICLO"
+        continue
+
+      original = DataUtils.normalizar_texto(base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"])
+      habitual = placa_habitual.get(original, "")
+      # Regra de segurança: se o motorista informou uma placa diferente da sua placa
+      # habitual, nunca atribuir automaticamente pela viagem. O abastecimento fica
+      # pendente até o administrador confirmar o motorista correto.
+      if original and habitual and placa != habitual:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "PENDENTE DE VALIDAÇÃO — PLACA NÃO HABITUAL"
+        base.at[idx, "MOTORISTA_CONSIDERADO"] = ""
+        base.at[idx, "MOTORISTA_VIAGEM"] = ""
+        base.at[idx, "VIAGENS_CICLO_QTD"] = int(len(cand))
+        cand_tmp = cand.copy()
+        cand_tmp["_MOTORISTA_N"] = cand_tmp["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
+        base.at[idx, "VIAGENS_CICLO_MOTORISTAS"] = " | ".join(sorted([m for m in cand_tmp["_MOTORISTA_N"].dropna().unique().tolist() if m]))
+        continue
+
+      if original and not habitual:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "PENDENTE DE VALIDAÇÃO — SEM PLACA HABITUAL"
+        base.at[idx, "MOTORISTA_CONSIDERADO"] = ""
+        base.at[idx, "MOTORISTA_VIAGEM"] = ""
         continue
 
       cand["_MOTORISTA_N"] = cand["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
@@ -2024,6 +2092,11 @@ class RewardEngine:
         .str.strip()
         .str.upper()
     )
+    # Abastecimentos pendentes de validação manual não entram no prêmio
+    # até que um motorista seja confirmado. Eles continuam no detalhamento.
+    base = base[base["MOTORISTA_CHAVE"] != ""].copy()
+    if base.empty:
+      return pd.DataFrame(columns=colunas_saida)
 
     cad = cadastro.copy()
     cad["MOTORISTA_CHAVE"] = (
@@ -2191,6 +2264,9 @@ def gerar_dados_multiplas_placas(eventos: pd.DataFrame):
       .str.strip()
       .str.upper()
   )
+  base = base[base["MOTORISTA_CHAVE"] != ""].copy()
+  if base.empty:
+    return pd.DataFrame(), []
   base["CATEGORIA_ABASTECIMENTO"] = (
       base["TIPO"].fillna("GERAL").replace({"TOCO": "TRUCK"})
   )
@@ -3278,6 +3354,7 @@ _CACHE_BASE_TOKEN = (
     _token_arquivos_abastecimentos_mensais(),
     _token_arquivos_viagens(),
     _token_arquivos_velocidade(),
+    _mtime_arquivo(ARQUIVO_VALIDACOES_VIAGEM),
     tuple(
         (nome, _mtime_arquivo(os.path.join(DATA_DIR if DATA_DIR and DATA_DIR != "." else ".", nome)))
         for nome in sorted([
@@ -3300,6 +3377,8 @@ def carregar_base(cache_token=None):
       abastecimentos = loader.carregar_abastecimentos(mapa_frota)
     viagens = loader.carregar_viagens()
     abastecimentos = associar_motorista_viagem(abastecimentos, viagens)
+    validacoes_viagem = carregar_validacoes_abastecimento_viagem()
+    abastecimentos = aplicar_validacoes_manuais_viagem(abastecimentos, validacoes_viagem)
     eventos = engine.calcular_eventos_consumo(abastecimentos)
     return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
 
@@ -4181,6 +4260,45 @@ with tabs[2]:
         st.dataframe(det_view[cols_auditoria],use_container_width=True,hide_index=True)
     else:
         st.dataframe(det_view,use_container_width=True,hide_index=True)
+
+    # ------------------------------------------------------------
+    # Conferência manual dos abastecimentos suspeitos
+    # ------------------------------------------------------------
+    if is_admin and det_view is not None and not det_view.empty:
+        pend = det_view[
+            det_view.get("STATUS_VALIDACAO_VIAGEM", pd.Series(index=det_view.index, dtype=str))
+            .astype(str).str.startswith("PENDENTE DE VALIDAÇÃO")
+        ].copy()
+        if not pend.empty:
+            st.markdown("#### ⚠️ Abastecimentos pendentes de validação")
+            st.caption("O sistema não vincula automaticamente placas não habituais ou ciclos ambíguos. Selecione o abastecimento e confirme o motorista correto.")
+            def _rotulo_pendente(_, r):
+                data = r.get("DATA_FILTRO", "")
+                if hasattr(data, "strftime"):
+                    data = data.strftime("%d/%m/%Y")
+                return f"{r.get('ID_ABASTECIMENTO','')} | {data} | {r.get('MOTORISTA_ABASTECIMENTO_ORIGINAL','')} | Placa {r.get('PLACA_PADRONIZADA','')} | {r.get('STATUS_VALIDACAO_VIAGEM','')}"
+            pend = pend.reset_index(drop=True)
+            opcoes_pend = [_rotulo_pendente(i, r) for i, r in pend.iterrows()]
+            sel_p = st.selectbox("Abastecimento para validar", opcoes_pend, key="val_abast_sel")
+            sel_idx = opcoes_pend.index(sel_p)
+            reg_p = pend.iloc[sel_idx]
+            motoristas_ativos = sorted(cadastro_all.loc[cadastro_all["STATUS"].astype(str).str.upper().eq("ATIVO"), "MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist()) if "STATUS" in cadastro_all.columns else sorted(cadastro_all["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
+            opcoes_m = [m for m in motoristas_ativos if m.strip()]
+            mot_manual = st.selectbox("Motorista correto", opcoes_m, key="val_abast_motorista") if opcoes_m else ""
+            obs_manual = st.text_input("Observação da validação", key="val_abast_obs", placeholder="Ex.: Abastecimento feito em veículo reserva durante a viagem")
+            cva, cvb = st.columns(2)
+            with cva:
+                if st.button("✅ Confirmar vínculo", key="val_abast_confirmar", disabled=(not mot_manual)):
+                    valid = carregar_validacoes_abastecimento_viagem()
+                    novo = pd.DataFrame([{"ID_ABASTECIMENTO":str(reg_p.get("ID_ABASTECIMENTO","")),"MOTORISTA_CORRETO":DataUtils.normalizar_texto(mot_manual),"OBSERVACAO":obs_manual,"DATA_VALIDACAO":datetime.now().strftime("%d/%m/%Y %H:%M:%S")}])
+                    valid = pd.concat([valid, novo], ignore_index=True)
+                    salvar_validacoes_abastecimento_viagem(valid)
+                    st.cache_resource.clear()
+                    st.success("Vínculo salvo. O abastecimento passará a ser considerado para o motorista selecionado.")
+                    st.rerun()
+            with cvb:
+                if st.button("🔄 Recalcular sem vincular", key="val_abast_recalc"):
+                    st.cache_resource.clear(); st.rerun()
 with tabs[6]:
     st.subheader("Recibo de Premiação")
     rec_fil=st.selectbox("Filial",filiais_lista,key="rf")
@@ -4463,22 +4581,7 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de eventos são exclusivos do Administrador.")
             if is_excesso and df_automatico is not None and not df_automatico.empty:
                 ex_auto = df_automatico.copy()
-                # O extrato oficial traz motorista/filial/eventos, mas pode não trazer categoria.
-                # Busca a categoria no resultado consolidado do motorista.
-                if "CATEGORIA" not in ex_auto.columns:
-                    ex_auto["CATEGORIA"] = ""
-                mapa_cat_ex = {}
-                if "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
-                    mapa_cat_ex = {
-                        DataUtils.normalizar_texto(r["MOTORISTA"]): DataUtils.normalizar_texto(r["CATEGORIA"])
-                        for _, r in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows()
-                        if DataUtils.normalizar_texto(r["CATEGORIA"])
-                    }
-                ex_auto["CATEGORIA"] = ex_auto.apply(
-                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
-                    axis=1,
-                )
-                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].apply(valor_ponto_categoria)
+                ex_auto["VALOR/EVENTO"] = ex_auto.get("CATEGORIA", pd.Series(index=ex_auto.index)).apply(valor_ponto_categoria)
                 ex_auto["DESCONTO"] = pd.to_numeric(ex_auto["EVENTOS"], errors="coerce").fillna(0) * ex_auto["VALOR/EVENTO"]
                 for _c in ["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]:
                     if _c not in ex_auto.columns: ex_auto[_c] = ""
@@ -4498,19 +4601,10 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             if is_excesso and df_automatico is not None and not df_automatico.empty:
                 st.success(f"✅ Extrato automático carregado: {len(df_automatico)} motoristas com eventos na competência {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}.")
                 ex_auto = df_automatico.copy()
-                mapa_cat_ex = {}
-                if not res_f.empty and "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
-                    for _, rr in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
-                        chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
-                        catv = DataUtils.normalizar_texto(rr["CATEGORIA"])
-                        if chave and catv:
-                            mapa_cat_ex[chave] = catv
-                ex_auto["CATEGORIA"] = ex_auto.get("CATEGORIA", "")
-                ex_auto["CATEGORIA"] = ex_auto.apply(
-                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
-                    axis=1,
-                )
-                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].map(valor_ponto_categoria).fillna(0.0)
+                ex_auto["VALOR/EVENTO"] = ex_auto["MOTORISTA"].map(
+                    res_f.set_index(res_f["MOTORISTA"].map(DataUtils.normalizar_texto))["CATEGORIA"].to_dict()
+                    if not res_f.empty else {}
+                ).map(valor_ponto_categoria).fillna(0.0)
                 ex_auto["DESCONTO"] = ex_auto["EVENTOS"] * ex_auto["VALOR/EVENTO"]
                 ex_auto["VALOR/EVENTO"] = ex_auto["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
                 ex_auto["DESCONTO"] = ex_auto["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
