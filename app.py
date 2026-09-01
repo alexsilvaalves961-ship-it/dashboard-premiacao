@@ -1,4 +1,5 @@
 import os
+import base64
 import hmac
 import hashlib
 import re
@@ -6,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Optional, Tuple
+import textwrap
 
 import streamlit as st
 import numpy as np
@@ -18,9 +20,132 @@ import matplotlib.pyplot as plt
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA (LOCAL / RAILWAY)
 # ================================================================
 DATA_DIR = os.getenv("DATA_DIR", ".")
+
+# Arquivos mensais de viagens: exemplo "viagens 08_2026.xlsx".
+# O aplicativo procura automaticamente todos os arquivos nesse padrão no mesmo diretório
+# dos demais arquivos hospedeiros.
+def _listar_arquivos_viagens():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  for nome in nomes:
+    if re.fullmatch(r"viagens\s+\d{2}_\d{4}\.(xlsx|xlsm|xls)", nome, flags=re.IGNORECASE):
+      encontrados.append(os.path.join(diretorio, nome))
+  return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
+
+def _token_arquivos_viagens():
+  token = []
+  for caminho in _listar_arquivos_viagens():
+    try:
+      token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError:
+      token.append((caminho, 0.0, 0))
+  return tuple(token)
+
+
+def _listar_arquivos_velocidade():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  padrao = r"Extrato\s+de\s+Velocidade\s+excedida\s+\d{2}-\d{2}\s+a\s+\d{2}-\d{2}(?:\s+\d{4})?\.(xlsx|xlsm|xls)$"
+  for nome in nomes:
+    if re.fullmatch(padrao, nome, flags=re.IGNORECASE):
+      encontrados.append(os.path.join(diretorio, nome))
+  return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
+
+def _token_arquivos_velocidade():
+  token = []
+  for caminho in _listar_arquivos_velocidade():
+    try:
+      token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError:
+      token.append((caminho, 0.0, 0))
+  return tuple(token)
+
+def _extrair_periodo_nome_velocidade(nome_arquivo):
+  nome = os.path.basename(nome_arquivo)
+  m = re.search(r"(\d{2})-(\d{2})\s+a\s+(\d{2})-(\d{2})", nome)
+  if not m:
+    return None
+  return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+def carregar_excesso_velocidade_automatico(dt_ini, dt_fim):
+  """Lê o extrato mensal correspondente à competência selecionada.
+
+  A planilha possui a aba 'Geral' com Motorista, Filial e Picos de Velocidade.
+  A competência é identificada pelos dias/meses no nome do arquivo, então o ano
+  pode variar sem exigir alteração do código.
+  """
+  try:
+    di = pd.Timestamp(dt_ini).date()
+    df = pd.Timestamp(dt_fim).date()
+  except Exception:
+    return pd.DataFrame()
+
+  alvo = (di.day, di.month, df.day, df.month)
+  arquivos = []
+  for caminho in _listar_arquivos_velocidade():
+    periodo = _extrair_periodo_nome_velocidade(caminho)
+    if periodo == alvo:
+      arquivos.append(caminho)
+
+  if not arquivos:
+    return pd.DataFrame()
+
+  caminho = arquivos[-1]
+  try:
+    bruto = pd.read_excel(caminho, sheet_name="Geral", engine="openpyxl", header=None, dtype=object)
+  except Exception as exc:
+    print(f"Erro ao ler extrato de velocidade {os.path.basename(caminho)}: {exc}")
+    return pd.DataFrame()
+
+  if bruto.empty:
+    return pd.DataFrame()
+
+  # Localiza a linha de cabeçalho que contém Motoristas/Filial/Picos de Velocidade.
+  cab_idx = None
+  cab = None
+  for i in range(min(len(bruto), 20)):
+    vals = [DataUtils.normalizar_texto(v) for v in bruto.iloc[i].tolist()]
+    if "MOTORISTAS" in vals and "FILIAL" in vals and "PICOS DE VELOCIDADE" in vals:
+      cab_idx = i
+      cab = vals
+      break
+  if cab_idx is None:
+    return pd.DataFrame()
+
+  idx_mot = cab.index("MOTORISTAS")
+  idx_fil = cab.index("FILIAL")
+  idx_evt = cab.index("PICOS DE VELOCIDADE")
+
+  dados = bruto.iloc[cab_idx + 1 :].copy()
+  out = pd.DataFrame({
+      "MOTORISTA": dados.iloc[:, idx_mot].apply(DataUtils.normalizar_texto),
+      "FILIAL": dados.iloc[:, idx_fil].apply(DataUtils.normalizar_texto),
+      "EVENTOS": pd.to_numeric(dados.iloc[:, idx_evt], errors="coerce").fillna(0),
+  })
+  out["EVENTOS"] = out["EVENTOS"].astype(int)
+  out = out[(out["MOTORISTA"] != "") & (out["EVENTOS"] > 0)].copy()
+  if out.empty:
+    return pd.DataFrame()
+
+  out["CATEGORIA"] = ""
+  out["DATA_EVENTO"] = pd.Timestamp(df).strftime("%d/%m/%Y")
+  out["OBSERVACAO"] = "Importado automaticamente do extrato mensal"
+  out["FONTE_EVENTO"] = "EXTRATO_VELOCIDADE"
+  out["ARQUIVO_FONTE"] = os.path.basename(caminho)
+  return out[["MOTORISTA","CATEGORIA","DATA_EVENTO","EVENTOS","OBSERVACAO","FONTE_EVENTO","ARQUIVO_FONTE"]].reset_index(drop=True)
+
 ARQUIVO_AUSENCIAS = os.path.join(DATA_DIR, "ausencias.csv")
 ARQUIVO_DESCLASSIFICACOES = os.path.join(DATA_DIR, "desclassificacoes.csv")
 ARQUIVO_CATEGORIAS_CUSTOM = os.path.join(DATA_DIR, "categorias_customizadas.csv")
+ARQUIVO_CATEGORIAS_VIGENCIA = os.path.join(DATA_DIR, "categorias_customizadas_vigencia.csv")
 ARQUIVO_FROTA_CUSTOM = os.path.join(DATA_DIR, "frota_customizada.csv")
 ARQUIVO_MOTORISTAS_CUSTOM = os.path.join(DATA_DIR, "motoristas_customizados.csv")
 ARQUIVO_INATIVOS = os.path.join(DATA_DIR, "inativos.csv")
@@ -28,6 +153,217 @@ ARQUIVO_DATAS_MOTORISTAS = os.path.join(DATA_DIR, "datas_motoristas.csv")
 ARQUIVO_CODIGOS_FUNCIONAIS = os.path.join(DATA_DIR, "codigos_funcionais.csv")
 ARQUIVO_EXCESSO_VELOCIDADE = os.path.join(DATA_DIR, "excesso_velocidade.csv")
 ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
+
+# Abastecimentos mensais: arquivos do tipo abastecimentos_MMYYYY.xlsx
+# O sistema arquiva internamente cada competência em um CSV separado, evitando
+# manter uma única planilha gigante. O arquivo legado uah_abastecimentos_3.xlsx
+# é usado somente para uma migração inicial, quando ainda não existirem os arquivos
+# históricos internos.
+PADRAO_ABASTECIMENTOS_MENSAL = r"abastecimentos[_\s-]?(\d{2})[_-]?(\d{4})\.(xlsx|xlsm|xls)$"
+ARQUIVO_ABASTECIMENTOS_LEGADO = os.path.join(DATA_DIR, "uah_abastecimentos_3.xlsx")
+
+def _listar_arquivos_abastecimentos_mensais():
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
+  try:
+    nomes = os.listdir(diretorio)
+  except OSError:
+    return []
+  encontrados = []
+  for nome in nomes:
+    m = re.fullmatch(PADRAO_ABASTECIMENTOS_MENSAL, nome, flags=re.IGNORECASE)
+    if m:
+      encontrados.append((int(m.group(1)), int(m.group(2)), os.path.join(diretorio, nome)))
+  return sorted(encontrados, key=lambda x: (x[1], x[0], os.path.basename(x[2]).lower()))
+
+def _token_arquivos_abastecimentos_mensais():
+  token=[]
+  for mm, yyyy, caminho in _listar_arquivos_abastecimentos_mensais():
+    try: token.append((caminho, os.path.getmtime(caminho), os.path.getsize(caminho)))
+    except OSError: token.append((caminho,0.0,0))
+  try:
+    token.append((ARQUIVO_ABASTECIMENTOS_LEGADO, os.path.getmtime(ARQUIVO_ABASTECIMENTOS_LEGADO), os.path.getsize(ARQUIVO_ABASTECIMENTOS_LEGADO)))
+  except OSError:
+    token.append((ARQUIVO_ABASTECIMENTOS_LEGADO,0.0,0))
+  return tuple(token)
+
+def _arquivo_historico_abastecimentos(mm, yyyy):
+  return os.path.join(DATA_DIR, f"historico_abastecimentos_{mm:02d}{yyyy:04d}.csv")
+
+def _competencia_do_mes_abastecimento(mm, yyyy):
+  # arquivo 082026 = competência 26/07/2026 a 25/08/2026
+  fim = pd.Timestamp(year=yyyy, month=mm, day=25)
+  inicio = (fim - pd.DateOffset(months=1)).replace(day=26)
+  return inicio.normalize(), fim.normalize()
+
+def _ler_planilha_abastecimentos_generica(caminho):
+  try:
+    return pd.read_excel(caminho, sheet_name=0, dtype=str, keep_default_na=False)
+  except Exception as exc:
+    print(f"Erro ao ler abastecimentos {os.path.basename(caminho)}: {exc}")
+    return pd.DataFrame()
+
+def _normalizar_base_abastecimentos_raw(df, mapa_frota):
+  # Reutiliza exatamente a mesma normalização do DataLoader, mas recebe o DataFrame
+  # já lido para permitir arquivamento mensal sem alterar as colunas originais.
+  if df is None or df.empty:
+    return pd.DataFrame()
+  col_placa = DataUtils.encontrar_coluna(df, ["PLACA", "CAVALO"])
+  col_km = DataUtils.encontrar_coluna(df, ["KM ATUAL", "KM", "KM_1", "QUILOMETRAGEM"])
+  col_litros = DataUtils.encontrar_coluna(df, ["QTDE", "LITROS", "QUANTIDADE", "QTD"])
+  col_valor = DataUtils.encontrar_coluna(df, ["VALOR TOTAL","VALOR","TOTAL","VALOR_TOTAL","VR TOTAL","VLR TOTAL","VALOR COMBUSTIVEL","VALOR (R$)"])
+  col_motorista = DataUtils.encontrar_coluna(df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS"])
+  col_data = DataUtils.encontrar_coluna(df, ["DATA","Data","DATA ABASTECIMENTO","DATA_ABASTECIMENTO","DATA DO ABASTECIMENTO","DATA/HORA","DATA HORA","DATA EMISSAO","DT_ABASTECIMENTO","DT ABAST"])
+  col_hora = DataUtils.encontrar_coluna(df, ["HORA","Hora","HORARIO","HORA ABASTECIMENTO"])
+  if any(c is None for c in [col_placa,col_km,col_litros,col_motorista,col_data]):
+    return pd.DataFrame()
+  out=df.copy()
+  # Identificador estável do registro, necessário para ordenar os abastecimentos
+  # quando os dados vêm dos históricos mensais.
+  out["_ORDEM_ORIGINAL"] = np.arange(len(out))
+  out["PLACA_PADRONIZADA"]=out[col_placa].apply(DataUtils.padronizar_placa)
+  out["KM_ATUAL_NUM"]=out[col_km].apply(DataUtils.converter_numero)
+  out["QTDE_NUM"]=out[col_litros].apply(DataUtils.converter_numero)
+  out["VALOR_NUM"]=out[col_valor].apply(DataUtils.converter_numero).fillna(0.0) if col_valor else 0.0
+  out["CONDUTOR_NORMALIZADO"]=out[col_motorista].fillna("SEM MOTORISTA").apply(DataUtils.normalizar_texto)
+  out["DATA_ORIGINAL"]=out[col_data]
+  out["DATA_FILTRO"]=out[col_data].apply(criar_data_filtro)
+  out["DATA_NUM"]=out["DATA_FILTRO"]
+  out["DATA"]=out["DATA_FILTRO"]
+  out["DATA_HORA_ABASTECIMENTO"]=out[col_data].apply(_parse_datetime_flex)
+  if col_hora:
+    hs=out[col_hora].apply(_parse_datetime_flex)
+    mask=hs.notna() & out["DATA_HORA_ABASTECIMENTO"].notna()
+    out.loc[mask,"DATA_HORA_ABASTECIMENTO"]=out.loc[mask,"DATA_HORA_ABASTECIMENTO"].dt.normalize()+pd.to_timedelta(hs.loc[mask].dt.hour*3600+hs.loc[mask].dt.minute*60+hs.loc[mask].dt.second,unit="s")
+  out["TIPO"]=out["PLACA_PADRONIZADA"].map(mapa_frota)
+  sem=out["TIPO"].isna()
+  for idx in out.index[sem]:
+    eq=DataUtils.placa_equivalente_mercosul(out.at[idx,"PLACA_PADRONIZADA"])
+    if eq and eq in mapa_frota: out.at[idx,"TIPO"]=mapa_frota[eq]
+  out["REGISTRO_VALIDO"]=(out["PLACA_PADRONIZADA"]!="") & out["KM_ATUAL_NUM"].notna() & (out["KM_ATUAL_NUM"]>0) & out["QTDE_NUM"].notna() & (out["QTDE_NUM"]>0)
+  return out
+
+def _colunas_historico_abastecimentos():
+  return ["ID_ABASTECIMENTO","_ORDEM_ORIGINAL","PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM","CONDUTOR_NORMALIZADO","DATA_FILTRO","DATA_NUM","DATA","DATA_HORA_ABASTECIMENTO","TIPO","REGISTRO_VALIDO","MOTORISTA_ABASTECIMENTO_ORIGINAL"]
+
+def _arquivar_abastecimentos_mensais(mapa_frota):
+  """Importa cada arquivo mensal para um histórico por competência.
+
+  Regras:
+  - O arquivo mensal da competência é a fonte oficial daquela competência.
+  - Ao existir o Excel mensal, o histórico daquela competência é RECONSTRUÍDO
+    (não concatenado), evitando duplicações e resíduos de versões anteriores.
+  - O histórico de competências anteriores permanece salvo mesmo que o Excel
+    correspondente seja removido da hospedagem.
+  - Cada linha recebe ID_ABASTECIMENTO único por competência/arquivo.
+  """
+  garantir_diretorio()
+  cols = _colunas_historico_abastecimentos()
+
+  # Primeiro, processa os arquivos mensais presentes.
+  mensal_processados = set()
+  for mm, yyyy, caminho in _listar_arquivos_abastecimentos_mensais():
+    raw = _ler_planilha_abastecimentos_generica(caminho)
+    norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
+    if norm.empty or "DATA_FILTRO" not in norm.columns:
+      continue
+
+    datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+    fim_comp = pd.Timestamp(year=yyyy, month=mm, day=25).normalize()
+    ini_comp = (fim_comp - pd.DateOffset(months=1)).replace(day=26).normalize()
+    norm = norm.loc[datas.notna() & (datas >= ini_comp) & (datas <= fim_comp)].copy()
+    if norm.empty:
+      # Se o arquivo mensal estiver vazio/incompatível, não destrói um histórico já válido.
+      continue
+
+    norm["ID_ABASTECIMENTO"] = [
+        f"{yyyy:04d}{mm:02d}-{int(i):06d}"
+        for i in norm["_ORDEM_ORIGINAL"].fillna(0).astype(int)
+    ]
+    norm["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = norm["CONDUTOR_NORMALIZADO"]
+
+    for c in cols:
+      if c not in norm.columns:
+        norm[c] = ""
+    part = norm[cols].copy()
+
+    arq = _arquivo_historico_abastecimentos(mm, yyyy)
+    # Fonte mensal substitui completamente o snapshot anterior da mesma competência.
+    part.to_csv(arq, index=False, encoding="utf-8-sig")
+    mensal_processados.add((mm, yyyy))
+
+  # Migração do legado somente para competências ainda sem histórico mensal.
+  if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO):
+    raw = _ler_planilha_abastecimentos_generica(ARQUIVO_ABASTECIMENTOS_LEGADO)
+    norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
+    if not norm.empty and "DATA_FILTRO" in norm.columns:
+      datas = pd.to_datetime(norm["DATA_FILTRO"], errors="coerce").dt.normalize()
+      norm = norm.loc[datas.notna()].copy()
+      if not norm.empty:
+        fim_comp = datas.apply(
+            lambda d: ((d + pd.DateOffset(months=1)).replace(day=25)
+                       if pd.notna(d) and d.day >= 26
+                       else (d.replace(day=25) if pd.notna(d) else pd.NaT))
+        )
+        comp_keys = fim_comp.dt.strftime("%m%Y")
+        for key in comp_keys.dropna().unique():
+          mm, yyyy = int(key[:2]), int(key[2:])
+          if (mm, yyyy) in mensal_processados:
+            continue
+          arq = _arquivo_historico_abastecimentos(mm, yyyy)
+          # Não reprocessa o legado sobre um histórico já consolidado.
+          if os.path.exists(arq):
+            continue
+          mask = comp_keys == key
+          part = norm.loc[mask].copy()
+          if part.empty:
+            continue
+          part["ID_ABASTECIMENTO"] = [
+              f"LEGACY-{yyyy:04d}{mm:02d}-{int(i):06d}"
+              for i in part["_ORDEM_ORIGINAL"].fillna(0).astype(int)
+          ]
+          part["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = part["CONDUTOR_NORMALIZADO"]
+          for c in cols:
+            if c not in part.columns:
+              part[c] = ""
+          part[cols].to_csv(arq, index=False, encoding="utf-8-sig")
+
+def _carregar_historico_abastecimentos_total():
+  registros=[]
+  diretorio = DATA_DIR if DATA_DIR and DATA_DIR!="." else "."
+  for nome in os.listdir(diretorio):
+    m=re.fullmatch(r"historico_abastecimentos_(\d{2})(\d{4})\.csv",nome,re.IGNORECASE)
+    if not m:
+      continue
+    mm, yyyy = int(m.group(1)), int(m.group(2))
+    caminho=os.path.join(diretorio,nome)
+    try:
+      df=pd.read_csv(caminho,dtype=str,encoding="utf-8-sig")
+      for c in _colunas_historico_abastecimentos():
+        if c not in df.columns: df[c]=""
+      df["_ORDEM_ORIGINAL"] = pd.to_numeric(df["_ORDEM_ORIGINAL"], errors="coerce").fillna(
+          pd.Series(range(len(df)), index=df.index)
+      ).astype(int)
+      # Histórico antigo sem ID: gera identificador único usando competência + posição.
+      idv = df["ID_ABASTECIMENTO"].fillna("").astype(str).str.strip()
+      falt = idv.eq("")
+      if falt.any():
+        df.loc[falt, "ID_ABASTECIMENTO"] = [
+            f"{yyyy:04d}{mm:02d}-{i:06d}" for i in df.index[falt]
+        ]
+      for c in ["KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM"]:
+        df[c]=df[c].apply(DataUtils.converter_numero)
+      df["REGISTRO_VALIDO"]=df["REGISTRO_VALIDO"].astype(str).str.lower().isin(["true","1","sim"])
+      df["DATA_FILTRO"]=df["DATA_FILTRO"].apply(parse_data_filtro)
+      df["DATA_NUM"]=df["DATA_FILTRO"]
+      df["DATA"]=df["DATA_FILTRO"]
+      df["DATA_HORA_ABASTECIMENTO"]=df["DATA_HORA_ABASTECIMENTO"].apply(_parse_datetime_flex)
+      registros.append(df[_colunas_historico_abastecimentos()])
+    except Exception as exc:
+      print(f"Erro ao carregar {nome}: {exc}")
+  if not registros:
+    return pd.DataFrame()
+  return pd.concat(registros,ignore_index=True)
+
 ARQUIVO_USUARIOS_ACESSO = os.path.join(DATA_DIR, "usuarios_acesso.csv")
 
 VALOR_PONTO_POR_CATEGORIA = {
@@ -80,7 +416,8 @@ def salvar_ausencias(df: pd.DataFrame):
 
 
 def carregar_desclassificacoes() -> pd.DataFrame:
-  """Carrega as desclassificações salvas em disco ou retorna DataFrame vazio."""
+  """Carrega as desclassificações com DATA_EVENTO para respeitar a competência 26-25."""
+  colunas = ["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "DATA_EVENTO", "OBSERVACAO"]
   if os.path.exists(ARQUIVO_DESCLASSIFICACOES):
     try:
       df = pd.read_csv(
@@ -88,12 +425,28 @@ def carregar_desclassificacoes() -> pd.DataFrame:
       )
       if "PONTOS" in df.columns:
         df["PONTOS"] = pd.to_numeric(df["PONTOS"], errors="coerce").fillna(1)
-      return df
+      else:
+        df["PONTOS"] = 1
+      if "DATA_EVENTO" not in df.columns:
+        # Compatibilidade com lançamentos antigos: não atribuir uma data falsa.
+        # Eles ficam marcados como legado e não entram em uma competência nova
+        # até receberem uma data pelo administrador.
+        df["DATA_EVENTO"] = ""
+      if "OBSERVACAO" not in df.columns:
+        df["OBSERVACAO"] = ""
+      if "MOTORISTA" not in df.columns:
+        df["MOTORISTA"] = ""
+      if "CRITERIO" not in df.columns:
+        df["CRITERIO"] = ""
+      if "TIPO_IMPACTO" not in df.columns:
+        df["TIPO_IMPACTO"] = "PONTOS"
+      for c in colunas:
+        if c not in df.columns:
+          df[c] = ""
+      return df[colunas]
     except Exception as e:
       print(f"Erro ao carregar desclassificações: {e}")
-  return pd.DataFrame(
-      columns=["MOTORISTA", "CRITERIO", "PONTOS", "TIPO_IMPACTO", "OBSERVACAO"]
-  )
+  return pd.DataFrame(columns=colunas)
 
 
 def salvar_desclassificacoes(df: pd.DataFrame):
@@ -153,6 +506,50 @@ def salvar_categorias_customizadas(mapa: dict):
     print(f"Erro ao salvar categorias customizadas: {e}")
 
 
+
+def carregar_categorias_vigencia() -> pd.DataFrame:
+  cols = ["MOTORISTA_CHAVE", "CATEGORIA_ESCOLHIDA", "DATA_INICIO", "DATA_FIM"]
+  if os.path.exists(ARQUIVO_CATEGORIAS_VIGENCIA):
+    try:
+      df = pd.read_csv(ARQUIVO_CATEGORIAS_VIGENCIA, dtype=str, encoding="utf-8-sig").fillna("")
+      for c in cols:
+        if c not in df.columns: df[c] = ""
+      return df[cols]
+    except Exception as e: print(f"Erro ao carregar vigências de categorias: {e}")
+  legado = carregar_categorias_customizadas()
+  if not legado: return pd.DataFrame(columns=cols)
+  try: dt_ref = pd.Timestamp(datetime.fromtimestamp(os.path.getmtime(ARQUIVO_CATEGORIAS_CUSTOM))).normalize()
+  except Exception: dt_ref = pd.Timestamp.now().normalize()
+  if dt_ref.day >= 26:
+    ini = dt_ref.replace(day=26); fim = (ini + pd.DateOffset(months=1)).replace(day=25)
+  else:
+    fim = dt_ref.replace(day=25); ini = (fim - pd.DateOffset(months=1)).replace(day=26)
+  df = pd.DataFrame([{"MOTORISTA_CHAVE":str(k).strip().upper(),"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(v),"DATA_INICIO":ini.strftime("%d/%m/%Y"),"DATA_FIM":fim.strftime("%d/%m/%Y")} for k,v in legado.items() if str(k).strip() and str(v).strip()])
+  try: df.to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+  except Exception as e: print(f"Erro ao criar arquivo de vigência de categorias: {e}")
+  return df[cols] if not df.empty else pd.DataFrame(columns=cols)
+
+def salvar_categorias_vigencia(df: pd.DataFrame):
+  try:
+    garantir_diretorio(); cols=["MOTORISTA_CHAVE","CATEGORIA_ESCOLHIDA","DATA_INICIO","DATA_FIM"]; out=df.copy()
+    for c in cols:
+      if c not in out.columns: out[c] = ""
+    out[cols].fillna("").to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+  except Exception as e: print(f"Erro ao salvar vigências de categorias: {e}")
+
+def categorias_ativas_na_competencia(df_vig: pd.DataFrame, data_ini, data_fim) -> dict:
+  if df_vig is None or df_vig.empty: return {}
+  ini_c=pd.Timestamp(data_ini).normalize(); fim_c=pd.Timestamp(data_fim).normalize(); ativos={}
+  for _,row in df_vig.iterrows():
+    chave=str(row.get("MOTORISTA_CHAVE","")).strip().upper(); cat=DataUtils.normalizar_texto(row.get("CATEGORIA_ESCOLHIDA",""))
+    if not chave or not cat: continue
+    di=parse_data_filtro(row.get("DATA_INICIO","")); df=parse_data_filtro(row.get("DATA_FIM",""))
+    if di is None: di=ini_c
+    if df is None: df=fim_c
+    di=pd.Timestamp(di).normalize(); df=pd.Timestamp(df).normalize()
+    if di <= fim_c and df >= ini_c: ativos[chave]=cat
+  return ativos
+
 def carregar_frota_customizada() -> pd.DataFrame:
   if os.path.exists(ARQUIVO_FROTA_CUSTOM):
     try:
@@ -195,6 +592,90 @@ def salvar_motoristas_customizados(df: pd.DataFrame):
     df.to_csv(ARQUIVO_MOTORISTAS_CUSTOM, index=False, encoding="utf-8-sig")
   except Exception as e:
     print(f"Erro ao salvar motoristas customizados: {e}")
+
+
+
+
+# ================================================================
+# MIGRAÇÃO ÚNICA DO CADASTRO LEGADO -> GESTÃO DE CADASTROS
+# ================================================================
+# A partir desta versão, a Pasta4 não é fonte de dados em runtime.
+# O snapshot abaixo é somente uma fotografia do cadastro legado usada UMA VEZ
+# para povoar o cadastro persistente da Gestão de Cadastros.
+# Depois da primeira gravação, o aplicativo passa a trabalhar exclusivamente
+# com motoristas_customizados.csv.
+LEGACY_CADASTRO_SNAPSHOT = [{'MOTORISTAS': 'ADEILSON DE OLIVEIRA ANGELINO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'AIRTON ANTONIO GONÇALVES', 'TIPO': 'BITRUCK', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'CLAUDINEI FRANCISCO FERREIRA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'CLAUDIO JOSE KREGENSKI', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'DANILO CASSIANO FERREIRA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'DIEISON APARECIDO DA CRUZ', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'DOUGLAS ENRIQUE DA SILVA LUIZ', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'EDILSON LEITE DE CAMARGO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'EDINEI MARCOS CORDEIRO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'EDISON VIEIRA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'EDSON RECOFKA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'EMERSON APARECIDO PEREIRA DA SILVA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'FABIANO CASTILHO CALEGARI', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'GEDIVALDO SOUZA LUZ ALVES', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'GILMAR LOPACINSKI', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'INACIO DOUTOR', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'JOAO PAULO LISNIOWSKI', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'JONAS GOGOLA DE ANDRADE', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'JOSIVAN DA SILVA OLIVEIRA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'JOSUE LOPES DE SENE', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'JULIANA COQUES PAZ', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'LEOMAR MOREIRA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'LIDIOMAR DA SILVA DE SOUZA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'MARCELO DA SILVA E SILVA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'MARCIO LEMOS MACHADO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'NELSON SOBOTHE', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'NILSON APARECIDO SAMPAIO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'NILSON RODRIGUES DE SOUZA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'NILTON DE JESUS RODRIGUES DE SOUZA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'ODAIR GONÇALVES MIRANDA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'PAULO DE MELO SILVA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'PEDRO VANDERLEI BRASILINO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'RICARDO SERGIO DA SILVA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'RODRIGO DE SOUZA MACHADO', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'VALDECI CARVALHO DA SILVA JUNIOR', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'VALDECI FERREIRA DA SILVA JUNIOR', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'WANDERLEY LOPES SILVA', 'TIPO': 'CARRETA', 'BASE': 'ARAUCARIA'}, {'MOTORISTAS': 'FELIPE TELES DA CRUZ', 'TIPO': 'BITRUCK', 'BASE': 'CAMPO GRANDE'}, {'MOTORISTAS': 'RENATO RIEFF MARIN', 'TIPO': 'CARRETA', 'BASE': 'CAMPO GRANDE'}, {'MOTORISTAS': 'ELICAR JUSTINO', 'TIPO': 'TRUCK', 'BASE': 'CHAPECO'}, {'MOTORISTAS': 'ANTONIO CARLOS BRAMBILA', 'TIPO': 'BITRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'JHONATAN ALVES DOS SANTOS', 'TIPO': 'BITRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'LINCOLN FRANCEL PIMENTA', 'TIPO': 'BITRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'RODRIGO LORENTINO', 'TIPO': 'BITRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'APARECIDO DIAMARAES', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'APARECIDO JOEL SANT ANA', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'APARECIDO RODRIGUES DA SILVA', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'CARLOS ELIER PIEROLI', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'ELISANGELA APARECIDA GOMES COELHO', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'FELIPE COMAR DIAS', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'MAURILIO FERREIRA DAS NEVES', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'RODOLFO MOZELLI SPAGOLLA', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'VALBER JUNIOR COSTA', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'WESLEI RIBEIRO JACOMINI', 'TIPO': 'CARRETA', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'GILBERTO BEZERRA PINTO', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'JOSE CARLOS RODRIGUES', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'JOSE DOS SANTOS', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'NIVALMIR ANTUNES', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'REGINALDO MENDES OLIVEIRA', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'SERGIO APARECIDO GIRALDELLO', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'VILSON TOMACHAK', 'TIPO': 'RODOTREM', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'DENNER DOS SANTOS', 'TIPO': 'TRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'DIEGO FRANCISCO DE SOUZA', 'TIPO': 'TRUCK', 'BASE': 'CIANORTE'}, {'MOTORISTAS': 'ALEX DOUGLAS LOPES ALONSO', 'TIPO': 'RODOTREM', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'ANDERSON DE SOUZA SOARES GOMES', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'ANDERSON NUBIATO RODRIGUES DA SILVA', 'TIPO': 'RODOTREM', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'ANGELA MARIA GONÇALVES', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'ANTONIO ROBERTO BELTRAMINI', 'TIPO': 'CARRETA', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'CELSO RICARDO RODRIGUES', 'TIPO': 'RODOTREM', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'CRISTIAN FABIANO LUIZ DA SILVA', 'TIPO': 'TOCO', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'EDE WILSON RODRIGUES', 'TIPO': 'CARRETA', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'EDVALDO GONCALVES', 'TIPO': 'RODOTREM', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'FABIO CARLOS ARAUJO DO CARMO', 'TIPO': 'CARRETA', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'FERNANDO EMIDIO DE SOUZA LIMA', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'GEDIELCIO CARVALHO COSTA', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'GILMAR DA SILVA', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'GILMAR FERREIRA NEVES', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'GUSTAVO ROBERTO PEREIRA', 'TIPO': 'CARRETA', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'JHONE GIMENES SANTOS', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'JOAO VITOR DOS SANTOS', 'TIPO': 'RODOTREM', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'JOSE NILSON MARTINS DE ARAUJO', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'LEANDRO DE OLIVEIRA FERREIRA', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'LUIS HENRIQUE SANTIAGO FIALHO', 'TIPO': 'FOLGUISTA', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'MICHEL ANTONIOLI', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'PAULO CESAR VICENTINI', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'TATIANE CAXIMIRO PEREIRA', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'VALDINEY FERREIRA PRIMO', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'WESLEY ZANETTI DE OLIVEIRA', 'TIPO': 'TRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'WILLIAM ANDRADE DE MOURA', 'TIPO': 'BITRUCK', 'BASE': 'GUARARAPES'}, {'MOTORISTAS': 'FRANCISCO DAS CHAGAS CORREA CRISPIM', 'TIPO': 'TRUCK', 'BASE': 'ITAJAI'}, {'MOTORISTAS': 'ROGERIO FRANÇA DOS SANTOS', 'TIPO': 'TRUCK', 'BASE': 'ITAJAI'}, {'MOTORISTAS': 'SILVANO DA SILVA FREITAS', 'TIPO': 'TRUCK', 'BASE': 'ITAJAI'}, {'MOTORISTAS': 'ANTONIO APARECIDO PEREIRA', 'TIPO': 'TRUCK', 'BASE': 'PAULINIA'}, {'MOTORISTAS': 'JOSE AUGUSTO DOS SANTOS', 'TIPO': 'TRUCK', 'BASE': 'PAULINIA'}, {'MOTORISTAS': 'RENATO PEREIRA FRANÇA', 'TIPO': 'RODOTREM', 'BASE': 'PAULINIA'}, {'MOTORISTAS': 'AGUINALDO DOS SANTOS TEIXEIRA', 'TIPO': 'RODO ENTREGA', 'BASE': 'SAO JOSE DOS CAMPOS'}, {'MOTORISTAS': 'KERLEI MIRANDA MARTINS', 'TIPO': 'TRUCK', 'BASE': 'SAO JOSE DOS CAMPOS'}, {'MOTORISTAS': 'TADEU JOSE CAETANO DE SOUZA', 'TIPO': 'TRUCK', 'BASE': 'SAO JOSE DOS CAMPOS'}, {'MOTORISTAS': 'RONAN ROMULO ANTUNES', 'TIPO': 'RODO ENTREGA', 'BASE': 'SAO JOSE DOS CAMPOS'}, {'MOTORISTAS': 'SIDNEI DE OLIVEIRA MARIANO', 'TIPO': 'CARRETA', 'BASE': 'SARANDI'}, {'MOTORISTAS': 'NIVALDO REIS MACHADO', 'TIPO': 'BITRUCK', 'BASE': 'UBERABA'}, {'MOTORISTAS': 'SIDNEY RODRIGUES FERREIRA', 'TIPO': 'BITRUCK', 'BASE': 'UBERABA'}, {'MOTORISTAS': 'WELLINGTON DE MELO BATISTA', 'TIPO': 'BITRUCK', 'BASE': 'UBERABA'}, {'MOTORISTAS': 'HIGOR GABRIEL OLIVEIRA BITU', 'TIPO': 'BITRUCK', 'BASE': 'UBERLANDIA'}, {'MOTORISTAS': 'JOSE DONIZETE FERREIRA GOMES', 'TIPO': 'BITRUCK', 'BASE': 'UBERLANDIA'}, {'MOTORISTAS': 'ANTONIO JOSE DE SOUZA MARTINS', 'TIPO': 'BITREM', 'BASE': 'VARZEA GRANDE'}, {'MOTORISTAS': 'JORGE SANTOS DA SILVA', 'TIPO': 'RODOTREM', 'BASE': 'VARZEA GRANDE'}, {'MOTORISTAS': 'MARCOS ROBERTO DOS SANTOS', 'TIPO': 'RODOTREM', 'BASE': 'VARZEA GRANDE'}, {'MOTORISTAS': 'OTAVIO ROSA FRANCO', 'TIPO': 'RODOTREM', 'BASE': 'VARZEA GRANDE'}]
+
+# Alguns cadastros atuais foram apenas correções de nome de pessoas já existentes
+# no cadastro legado. A chave canônica evita duplicar essas pessoas durante a migração.
+ALIASES_MOTORISTAS_MIGRACAO = {
+    "WANDERLEY LOPES DA SILVA": "WANDERLEY LOPES SILVA",
+    "MARCOS ROBERTO DOS SANTOS ROSA": "MARCOS ROBERTO DOS SANTOS",
+}
+
+def _chave_migracao_motorista(nome: str) -> str:
+    nome_n = DataUtils.normalizar_texto(nome)
+    return ALIASES_MOTORISTAS_MIGRACAO.get(nome_n, nome_n)
+
+
+def migrar_cadastro_legado_uma_vez() -> int:
+    """Povoa o cadastro persistente com o snapshot legado e os cadastros atuais.
+
+    Não lê Pasta4.xlsx. O snapshot está incorporado no código exclusivamente para
+    permitir a transição única. Os dados já existentes na Gestão de Cadastros têm
+    prioridade sobre nome/categoria/filial do legado.
+    """
+    try:
+        atual = carregar_motoristas_customizados().copy()
+        for c in ["MOTORISTAS", "TIPO", "BASE"]:
+            if c not in atual.columns:
+                atual[c] = ""
+        atual = atual[["MOTORISTAS", "TIPO", "BASE"]].copy()
+        atual["MOTORISTAS"] = atual["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+        atual["TIPO"] = atual["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
+        atual["BASE"] = atual["BASE"].apply(DataUtils.normalizar_texto)
+        atual = atual[atual["MOTORISTAS"] != ""].copy()
+
+        # Snapshot legado; não depende do arquivo Pasta4.
+        legado = pd.DataFrame(LEGACY_CADASTRO_SNAPSHOT, columns=["MOTORISTAS", "TIPO", "BASE"])
+        legado["MOTORISTAS"] = legado["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+        legado["TIPO"] = legado["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
+        legado["BASE"] = legado["BASE"].apply(DataUtils.normalizar_texto)
+
+        # Cadastro legado primeiro.
+        mesclado = {}
+        for _, r in legado.iterrows():
+            chave = _chave_migracao_motorista(r["MOTORISTAS"])
+            if chave:
+                mesclado[chave] = {
+                    "MOTORISTAS": r["MOTORISTAS"],
+                    "TIPO": r["TIPO"],
+                    "BASE": r["BASE"],
+                }
+
+        # Cadastro atual tem prioridade e também pode corrigir o nome do legado.
+        for _, r in atual.iterrows():
+            chave = _chave_migracao_motorista(r["MOTORISTAS"])
+            if chave:
+                mesclado[chave] = {
+                    "MOTORISTAS": r["MOTORISTAS"],
+                    "TIPO": r["TIPO"],
+                    "BASE": r["BASE"],
+                }
+
+        final = pd.DataFrame(list(mesclado.values()), columns=["MOTORISTAS","TIPO","BASE"])
+        final = final.sort_values("MOTORISTAS", kind="stable").reset_index(drop=True)
+
+        antes = len(atual)
+        # Faz a migração quando ainda não há o conjunto completo do cadastro persistente.
+        # Depois que chegar ao conjunto consolidado, reexecutar é idempotente.
+        if len(final) > antes or antes < len(LEGACY_CADASTRO_SNAPSHOT):
+            salvar_motoristas_customizados(final)
+            return len(final)
+        return antes
+    except Exception as e:
+        print(f"Erro na migração inicial do cadastro: {e}")
+        return len(carregar_motoristas_customizados())
 
 
 def _carregar_eventos_pilar(caminho: str) -> pd.DataFrame:
@@ -250,12 +731,30 @@ def aplicar_descontos_eventos(df_resumo: pd.DataFrame, df_excesso: pd.DataFrame,
         return res
     for c in ["EVENTOS_EXCESSO_VELOCIDADE","DESCONTO_EXCESSO_VELOCIDADE","EVENTOS_CONTROLE_JORNADA","DESCONTO_CONTROLE_JORNADA"]:
         res[c] = 0
+
+    # Fonte oficial da categoria para os eventos: resultado do cálculo do motorista.
+    # Isso evita VALOR/EVENTO = R$ 0,00 quando o extrato automático não traz categoria.
+    mapa_categoria = {}
+    if "MOTORISTA" in res.columns and "CATEGORIA" in res.columns:
+        for _, rr in res[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
+            chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
+            categoria = DataUtils.normalizar_texto(rr["CATEGORIA"])
+            if chave and categoria:
+                mapa_categoria[chave] = categoria
+
     for df, prefix in [(df_excesso, "EXCESSO"), (df_jornada, "JORNADA")]:
         if df is None or df.empty:
             continue
         tmp = df.copy()
         tmp["MOTORISTA_N"] = tmp["MOTORISTA"].apply(DataUtils.normalizar_texto)
         tmp["EVENTOS"] = pd.to_numeric(tmp["EVENTOS"], errors="coerce").fillna(0)
+        if "CATEGORIA" not in tmp.columns:
+            tmp["CATEGORIA"] = ""
+        tmp["CATEGORIA"] = tmp.apply(
+            lambda r: r["CATEGORIA"] if DataUtils.normalizar_texto(r.get("CATEGORIA", ""))
+            else mapa_categoria.get(r["MOTORISTA_N"], ""),
+            axis=1,
+        )
         tmp["VALOR_PONTO"] = tmp["CATEGORIA"].apply(valor_ponto_categoria)
         tmp["DESCONTO"] = tmp["EVENTOS"] * tmp["VALOR_PONTO"]
         agg = tmp.groupby("MOTORISTA_N").agg(EVENTOS=("EVENTOS","sum"), DESCONTO=("DESCONTO","sum"))
@@ -473,7 +972,6 @@ def alternar_inativo(tipo: str, valor: str, inativar: bool = True, data_inativac
 class AppConfig:
   CAMINHO_PRECOS: str = "Pasta2.xlsx"
   CAMINHO_FROTA: str = "frota.xlsx"
-  CAMINHO_MOTORISTAS: str = "Pasta4.xlsx"
   CAMINHO_ABASTECIMENTOS: str = "uah_abastecimentos_3.xlsx"
 
   def _resolver_caminho_real(self, nome_arquivo: str) -> str:
@@ -518,73 +1016,68 @@ class AppConfig:
       })
       df_f.to_excel(self.CAMINHO_FROTA, index=False)
 
-    if not os.path.isfile(self.CAMINHO_MOTORISTAS):
-      df_m = pd.DataFrame([
-          ["MOTORISTAS", "TIPO", "BASE"],
-          ["JOAO SILVA", "TRUCK", "CIANORTE"],
-          ["MARIA SOUZA", "BITRUCK", "UBERABA"],
-          ["CARLOS ALVES", "CARRETA", "MARINGA"],
-          ["WESLEI", "MULTIPLASCATEGORIAS", "CIANORTE"],
-      ])
-      df_m.to_excel(self.CAMINHO_MOTORISTAS, header=False, index=False)
-
-    if not os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
-      df_a = pd.DataFrame({
-          "DATA": [
-              "01/08/2026",
-              "05/08/2026",
-              "10/08/2026",
-              "15/08/2026",
-              "01/08/2026",
-              "05/08/2026",
-              "10/08/2026",
-              "15/08/2026",
-          ],
-          "PLACA": [
-              "ABC1234",
-              "ABC1234",
-              "DEF5678",
-              "DEF5678",
-              "WES0001",
-              "WES0002",
-              "WES0003",
-              "WES0004",
-          ],
-          "MOTORISTA": [
-              "JOAO SILVA",
-              "JOAO SILVA",
-              "MARIA SOUZA",
-              "MARIA SOUZA",
-              "WESLEI",
-              "WESLEI",
-              "WESLEI",
-              "WESLEI",
-          ],
-          "KM": [1000, 1500, 2000, 2600, 100, 500, 1000, 1600],
-          "QTDE": [200, 180, 280, 270, 50, 100, 150, 200],
-          "VALOR": [
-              1200.0,
-              1080.0,
-              1680.0,
-              1620.0,
-              300.0,
-              600.0,
-              900.0,
-              1200.0,
-          ],
-      })
-      df_a.to_excel(self.CAMINHO_ABASTECIMENTOS, index=False)
+    # A base fictícia de abastecimentos só é criada quando não existe
+    # absolutamente nenhuma fonte real (legado, mensal ou histórico).
+    if (not os.path.isfile(self.CAMINHO_ABASTECIMENTOS)
+        and not _listar_arquivos_abastecimentos_mensais()
+        and not any(name.startswith("historico_abastecimentos_") and name.endswith(".csv")
+                    for name in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR != "." else "."))):
+          if not os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
+            df_a = pd.DataFrame({
+                "DATA": [
+                    "01/08/2026",
+                    "05/08/2026",
+                    "10/08/2026",
+                    "15/08/2026",
+                    "01/08/2026",
+                    "05/08/2026",
+                    "10/08/2026",
+                    "15/08/2026",
+                ],
+                "PLACA": [
+                    "ABC1234",
+                    "ABC1234",
+                    "DEF5678",
+                    "DEF5678",
+                    "WES0001",
+                    "WES0002",
+                    "WES0003",
+                    "WES0004",
+                ],
+                "MOTORISTA": [
+                    "JOAO SILVA",
+                    "JOAO SILVA",
+                    "MARIA SOUZA",
+                    "MARIA SOUZA",
+                    "WESLEI",
+                    "WESLEI",
+                    "WESLEI",
+                    "WESLEI",
+                ],
+                "KM": [1000, 1500, 2000, 2600, 100, 500, 1000, 1600],
+                "QTDE": [200, 180, 280, 270, 50, 100, 150, 200],
+                "VALOR": [
+                    1200.0,
+                    1080.0,
+                    1680.0,
+                    1620.0,
+                    300.0,
+                    600.0,
+                    900.0,
+                    1200.0,
+                ],
+            })
+            df_a.to_excel(self.CAMINHO_ABASTECIMENTOS, index=False)
 
   def verificar_arquivos(self):
     self.criar_arquivos_teste_se_ausentes()
     self.CAMINHO_PRECOS = self._resolver_caminho_real(self.CAMINHO_PRECOS)
     self.CAMINHO_FROTA = self._resolver_caminho_real(self.CAMINHO_FROTA)
-    self.CAMINHO_MOTORISTAS = self._resolver_caminho_real(
-        self.CAMINHO_MOTORISTAS
-    )
-    self.CAMINHO_ABASTECIMENTOS = self._resolver_caminho_real(
-        self.CAMINHO_ABASTECIMENTOS
-    )
+    # O abastecimento pode vir do legado ou, preferencialmente, dos arquivos
+    # mensais abastecimentos_MMYYYY.xlsx. Não exigimos o legado quando já existe
+    # qualquer arquivo mensal ou histórico interno.
+    if os.path.isfile(self.CAMINHO_ABASTECIMENTOS):
+      self.CAMINHO_ABASTECIMENTOS = self._resolver_caminho_real(self.CAMINHO_ABASTECIMENTOS)
 
 
 # ================================================================
@@ -762,6 +1255,44 @@ def parse_data_filtro(val) -> Optional[pd.Timestamp]:
     return None
 
 
+def _parse_datetime_flex(valor) -> pd.Timestamp:
+  """Converte datas/horas, inclusive serial do Excel, preservando o horário."""
+  if valor is None:
+    return pd.NaT
+  try:
+    if pd.isna(valor):
+      return pd.NaT
+  except Exception:
+    pass
+
+  if isinstance(valor, (pd.Timestamp, datetime, np.datetime64)):
+    try:
+      return pd.Timestamp(valor)
+    except Exception:
+      return pd.NaT
+
+  if isinstance(valor, (int, float, np.integer, np.floating)):
+    try:
+      n = float(valor)
+      if n > 20000:
+        return pd.to_datetime(n, unit="D", origin="1899-12-30", errors="coerce")
+      if 0 <= n < 1:
+        return pd.Timestamp("1899-12-30") + pd.to_timedelta(n, unit="D")
+    except Exception:
+      return pd.NaT
+
+  texto = str(valor).strip()
+  if not texto:
+    return pd.NaT
+  try:
+    dt = pd.to_datetime(texto, dayfirst=True, errors="coerce")
+    if pd.notna(dt):
+      return pd.Timestamp(dt)
+  except Exception:
+    pass
+  return pd.NaT
+
+
 def criar_data_filtro(valor) -> pd.Timestamp:
   parsed = parse_data_filtro(valor)
   return parsed if parsed is not None else pd.NaT
@@ -895,88 +1426,131 @@ class DataLoader:
     return resultado, mapa
 
   def carregar_cadastro_motoristas(self) -> pd.DataFrame:
-    bruto = pd.read_excel(
-        self.config.CAMINHO_MOTORISTAS, sheet_name=0, header=None
-    )
-    cab_idx, linha_cab = None, None
+    """
+    Cadastro oficial dos motoristas: a fonte única é a Gestão de Cadastros.
 
-    for i in range(min(len(bruto), 15)):
-      vals = [str(x).strip().upper() for x in bruto.iloc[i].tolist()]
-      if "MOTORISTAS" in vals and "TIPO" in vals:
-        cab_idx, linha_cab = i, vals
-        break
+    A partir desta versão, o antigo arquivo-base de motoristas não participa mais
+    do carregamento, cálculo, filtros ou relatório RH. O cadastro persistente é o arquivo
+    interno ARQUIVO_MOTORISTAS_CUSTOM, alimentado pela tela Gestão de Cadastros.
+    """
+    df_custom = carregar_motoristas_customizados().copy()
 
-    if cab_idx is None:
-      cadastro = pd.DataFrame({
-          "MOTORISTA_CADASTRO": bruto.iloc[:, 0].apply(
-              DataUtils.normalizar_texto
-          ),
-          "TIPO_CADASTRO": bruto.iloc[:, 1]
-          .apply(DataUtils.normalizar_texto)
-          .replace({"TOCO": "TRUCK"}),
-          "BASE_CADASTRO": (
-              bruto.iloc[:, 2].apply(DataUtils.normalizar_texto)
-              if bruto.shape[1] > 2
-              else ""
-          ),
-      })
-    else:
-      idx_mot = linha_cab.index("MOTORISTAS")
-      idx_tipo = linha_cab.index("TIPO")
-      idx_base = linha_cab.index("BASE") if "BASE" in linha_cab else None
-
-      cadastro = bruto.iloc[cab_idx + 1 :].copy()
-      cadastro["MOTORISTA_CADASTRO"] = cadastro.iloc[:, idx_mot].apply(
-          DataUtils.normalizar_texto
+    if df_custom.empty:
+      return pd.DataFrame(
+          columns=[
+              "MOTORISTA_CADASTRO",
+              "TIPO_CADASTRO",
+              "BASE_CADASTRO",
+              "EH_FOLGUISTA",
+              "CODIGO_FUNCIONAL",
+              "DATA_CONTRATACAO",
+              "STATUS",
+              "DATA_INATIVACAO",
+          ]
       )
-      cadastro["TIPO_CADASTRO"] = (
-          cadastro.iloc[:, idx_tipo]
-          .apply(DataUtils.normalizar_texto)
-          .replace({"TOCO": "TRUCK"})
-      )
-      cadastro["BASE_CADASTRO"] = (
-          cadastro.iloc[:, idx_base].apply(DataUtils.normalizar_texto)
-          if idx_base is not None
-          else ""
-      )
-      cadastro = cadastro[
-          (cadastro["MOTORISTA_CADASTRO"] != "")
-          & (cadastro["TIPO_CADASTRO"] != "")
-      ][["MOTORISTA_CADASTRO", "TIPO_CADASTRO", "BASE_CADASTRO"]]
 
-    df_custom = carregar_motoristas_customizados()
-    if not df_custom.empty:
-      df_c_fmt = pd.DataFrame({
-          "MOTORISTA_CADASTRO": df_custom["MOTORISTAS"].apply(
-              DataUtils.normalizar_texto
-          ),
-          "TIPO_CADASTRO": df_custom["TIPO"]
-          .apply(DataUtils.normalizar_texto)
-          .replace({"TOCO": "TRUCK"}),
-          "BASE_CADASTRO": df_custom["BASE"].apply(DataUtils.normalizar_texto),
-      })
-      cadastro = pd.concat([cadastro, df_c_fmt], ignore_index=True)
+    # Garante estrutura mínima do cadastro persistente.
+    for c in ["MOTORISTAS", "TIPO", "BASE"]:
+      if c not in df_custom.columns:
+        df_custom[c] = ""
+
+    cadastro = pd.DataFrame({
+        "MOTORISTA_CADASTRO": df_custom["MOTORISTAS"].apply(DataUtils.normalizar_texto),
+        "TIPO_CADASTRO": df_custom["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO": "TRUCK"}),
+        "BASE_CADASTRO": df_custom["BASE"].apply(DataUtils.normalizar_texto),
+    })
+
+    # Elimina linhas vazias e mantém um único cadastro por motorista.
+    cadastro = cadastro[
+        (cadastro["MOTORISTA_CADASTRO"] != "")
+        & (cadastro["TIPO_CADASTRO"] != "")
+    ].copy()
 
     cadastro["EH_FOLGUISTA"] = cadastro["TIPO_CADASTRO"].eq("FOLGUISTA")
-    cadastro = cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last")
+    cadastro = cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last").reset_index(drop=True)
 
+    # Dados complementares administrados pela própria Gestão de Cadastros.
     inativos_dict = carregar_inativos().get("MOTORISTA", {})
     datas_contratacao = carregar_datas_motoristas()
     codigos_funcionais = carregar_codigos_funcionais()
+
     cadastro["CODIGO_FUNCIONAL"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: codigos_funcionais.get(x, "")
+        lambda x: str(codigos_funcionais.get(x, "") or "").strip()
+    )
+    cadastro["DATA_CONTRATACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
+        lambda x: str(datas_contratacao.get(x, "") or "").strip()
     )
     cadastro["STATUS"] = cadastro["MOTORISTA_CADASTRO"].apply(
         lambda x: "INATIVO" if x in inativos_dict else "ATIVO"
     )
-    cadastro["DATA_CONTRATACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: datas_contratacao.get(x, "")
-    )
     cadastro["DATA_INATIVACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: inativos_dict.get(x, "")
+        lambda x: str(inativos_dict.get(x, "") or "").strip()
     )
 
     return cadastro
+
+  def carregar_viagens(self) -> pd.DataFrame:
+    """Carrega automaticamente os arquivos mensais "viagens MM_YYYY.xlsx".
+
+    O cruzamento usa placa + faixa de odômetro e prioriza a janela de data/hora da viagem.
+    Arquivos de todos os meses disponíveis são aceitos para cobrir viagens iniciadas em
+    um mês e abastecimentos ocorridos no mês seguinte.
+    """
+    arquivos = _listar_arquivos_viagens()
+    if not arquivos:
+      return pd.DataFrame()
+
+    registros = []
+    for caminho in arquivos:
+      try:
+        bruto = pd.read_excel(caminho, sheet_name=0, dtype=object, keep_default_na=False)
+        if bruto.empty:
+          continue
+
+        col_dt_ini = DataUtils.encontrar_coluna(bruto, ["Dt Macro Inicial", "DATA INICIAL", "INICIO VIAGEM"])
+        col_dt_fim = DataUtils.encontrar_coluna(bruto, ["Dt Macro Final", "DATA FINAL", "FIM VIAGEM"])
+        col_odm_ini = DataUtils.encontrar_coluna(bruto, ["Odm Inicial", "ODM INICIAL", "KM INICIAL"])
+        col_odm_fim = DataUtils.encontrar_coluna(bruto, ["Odm Final", "ODM FINAL", "KM FINAL"])
+        col_km_total = DataUtils.encontrar_coluna(bruto, ["Km Total", "KM TOTAL"])
+        col_motorista = DataUtils.encontrar_coluna(bruto, ["Motorista", "CONDUTOR", "MOTORISTA"])
+        col_placa = DataUtils.encontrar_coluna(bruto, ["Dim Veiculo Enterprise - Sk Veiculo → Placa", "PLACA", "CAVALO"])
+        col_origem = DataUtils.encontrar_coluna(bruto, ["Cidade Inicial", "ORIGEM", "CIDADE ORIGEM"])
+        col_destino = DataUtils.encontrar_coluna(bruto, ["Cidade Final", "DESTINO", "CIDADE DESTINO"])
+
+        obrigatorias = [col_dt_ini, col_dt_fim, col_odm_ini, col_odm_fim, col_motorista, col_placa]
+        if any(c is None for c in obrigatorias):
+          print(f"Arquivo de viagens ignorado por colunas ausentes: {os.path.basename(caminho)}")
+          continue
+
+        out = pd.DataFrame(index=bruto.index)
+        out["VIAGEM_DATA_INICIO"] = bruto[col_dt_ini].apply(_parse_datetime_flex)
+        out["VIAGEM_DATA_FIM"] = bruto[col_dt_fim].apply(_parse_datetime_flex)
+        out["VIAGEM_ODM_INICIAL"] = bruto[col_odm_ini].apply(DataUtils.converter_numero)
+        out["VIAGEM_ODM_FINAL"] = bruto[col_odm_fim].apply(DataUtils.converter_numero)
+        out["VIAGEM_KM_TOTAL"] = bruto[col_km_total].apply(DataUtils.converter_numero) if col_km_total else np.nan
+        out["MOTORISTA_VIAGEM"] = bruto[col_motorista].apply(DataUtils.normalizar_texto)
+        out["PLACA_VIAGEM"] = bruto[col_placa].apply(DataUtils.padronizar_placa)
+        out["VIAGEM_ORIGEM"] = bruto[col_origem].astype(str).str.strip() if col_origem else ""
+        out["VIAGEM_DESTINO"] = bruto[col_destino].astype(str).str.strip() if col_destino else ""
+        out["VIAGEM_ARQUIVO"] = os.path.basename(caminho)
+
+        out = out[
+            (out["PLACA_VIAGEM"] != "")
+            & out["VIAGEM_ODM_INICIAL"].notna()
+            & out["VIAGEM_ODM_FINAL"].notna()
+            & (out["MOTORISTA_VIAGEM"] != "")
+        ].copy()
+        if not out.empty:
+          # Normaliza viagens que eventualmente estejam registradas com ODM invertido.
+          out["_ODM_MIN"] = out[["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL"]].min(axis=1)
+          out["_ODM_MAX"] = out[["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL"]].max(axis=1)
+          registros.append(out)
+      except Exception as exc:
+        print(f"Erro ao carregar viagens {os.path.basename(caminho)}: {exc}")
+
+    if not registros:
+      return pd.DataFrame()
+    return pd.concat(registros, ignore_index=True)
 
   def carregar_abastecimentos(self, mapa_frota: dict) -> pd.DataFrame:
     df = pd.read_excel(
@@ -1024,6 +1598,7 @@ class DataLoader:
             "DT ABAST",
         ],
     )
+    col_hora = DataUtils.encontrar_coluna(df, ["HORA", "Hora", "HORARIO", "HORA ABASTECIMENTO"])
 
     resultado = df.copy()
     resultado["_ORDEM_ORIGINAL"] = np.arange(len(resultado))
@@ -1052,10 +1627,32 @@ class DataLoader:
       resultado["DATA_FILTRO"] = resultado[col_data].apply(criar_data_filtro)
       resultado["DATA_NUM"] = resultado["DATA_FILTRO"]
       resultado["DATA"] = resultado["DATA_FILTRO"]
+      resultado["DATA_HORA_ABASTECIMENTO"] = resultado[col_data].apply(_parse_datetime_flex)
+      if col_hora:
+        hora_series = resultado[col_hora].apply(_parse_datetime_flex)
+        mascara_hora = hora_series.notna() & resultado["DATA_HORA_ABASTECIMENTO"].notna()
+        resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"] = (
+            resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"].dt.normalize()
+            + (hora_series.loc[mascara_hora] - pd.Timestamp("1899-12-30")).where(
+                hora_series.loc[mascara_hora] < pd.Timestamp("1900-01-01"),
+                pd.to_timedelta(hora_series.loc[mascara_hora].dt.hour * 3600 + hora_series.loc[mascara_hora].dt.minute * 60 + hora_series.loc[mascara_hora].dt.second, unit="s"),
+            )
+        )
+        # Caso a coluna de hora tenha vindo como datetime-base do Excel, usa somente o horário.
+        resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"] = (
+            resultado.loc[mascara_hora, "DATA_HORA_ABASTECIMENTO"].dt.normalize()
+            + pd.to_timedelta(
+                hora_series.loc[mascara_hora].dt.hour * 3600
+                + hora_series.loc[mascara_hora].dt.minute * 60
+                + hora_series.loc[mascara_hora].dt.second,
+                unit="s",
+            )
+        )
     else:
       resultado["DATA_ORIGINAL"] = pd.NaT
       resultado["DATA_NUM"] = pd.NaT
       resultado["DATA_FILTRO"] = pd.NaT
+      resultado["DATA_HORA_ABASTECIMENTO"] = pd.NaT
 
     resultado["TIPO"] = resultado["PLACA_PADRONIZADA"].map(mapa_frota)
 
@@ -1084,6 +1681,175 @@ class DataLoader:
     )
 
     return resultado
+
+
+# ================================================================
+# VALIDAÇÃO DO MOTORISTA PELO HISTÓRICO DE VIAGENS
+# ================================================================
+def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFrame) -> pd.DataFrame:
+  """Concilia cada abastecimento com o ciclo de viagens entre dois abastecimentos.
+
+  Regra operacional da ficha manual:
+  - o abastecimento atual normalmente fecha o ciclo iniciado no abastecimento anterior;
+  - o motorista responsável é identificado pelas viagens realizadas entre os dois KM de
+    abastecimento, usando placa + faixa de odômetro e janela temporal;
+  - se todas as viagens candidatas do ciclo pertencem a um único motorista, a atribuição
+    é automática;
+  - se houver mais de um motorista possível no mesmo ciclo, o sistema não "chuta":
+    mantém o motorista original e marca PENDENTE DE VALIDAÇÃO;
+  - o KM/média continuam sendo calculados pela sequência da placa, independentemente
+    do motorista que ficou associado ao abastecimento.
+  """
+  base = abastecimentos.copy()
+  base["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = base.get("CONDUTOR_NORMALIZADO", "").astype(str)
+  base["MOTORISTA_VIAGEM"] = ""
+  base["MOTORISTA_CONSIDERADO"] = base["MOTORISTA_ABASTECIMENTO_ORIGINAL"]
+  base["STATUS_VALIDACAO_VIAGEM"] = "SEM ARQUIVO DE VIAGENS" if viagens is None or viagens.empty else "SEM ABASTECIMENTO ANTERIOR"
+  for c in ["VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO", "VIAGENS_CICLO_MOTORISTAS"]:
+    base[c] = ""
+  for c in ["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL", "VIAGEM_KM_TOTAL", "KM_ABASTECIMENTO_ANTERIOR"]:
+    base[c] = np.nan
+  for c in ["VIAGEM_DATA_INICIO", "VIAGEM_DATA_FIM", "DATA_HORA_ABASTECIMENTO_ANTERIOR"]:
+    base[c] = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
+  base["VIAGENS_CICLO_QTD"] = 0
+
+  if base.empty or viagens is None or viagens.empty:
+    return base
+
+  viagens = viagens.copy()
+  viagens = viagens[
+      viagens["PLACA_VIAGEM"].notna()
+      & (viagens["PLACA_VIAGEM"].astype(str).str.strip() != "")
+      & viagens["_ODM_MIN"].notna()
+      & viagens["_ODM_MAX"].notna()
+      & viagens["MOTORISTA_VIAGEM"].notna()
+      & (viagens["MOTORISTA_VIAGEM"].astype(str).str.strip() != "")
+  ].copy()
+  if viagens.empty:
+    return base
+
+  viagens["VIAGEM_DATA_INICIO"] = viagens["VIAGEM_DATA_INICIO"].apply(_parse_datetime_flex)
+  viagens["VIAGEM_DATA_FIM"] = viagens["VIAGEM_DATA_FIM"].apply(_parse_datetime_flex)
+  por_placa = {placa: grp for placa, grp in viagens.groupby("PLACA_VIAGEM", sort=False)}
+
+  # A sequência por placa é a referência do ciclo. Ordenamos todas as linhas para
+  # encontrar o abastecimento imediatamente anterior, inclusive de outra competência.
+  base["_TMP_DT"] = pd.to_datetime(base.get("DATA_HORA_ABASTECIMENTO", base.get("DATA_NUM")), errors="coerce")
+  base["_TMP_DT"] = base["_TMP_DT"].apply(lambda x: _parse_datetime_flex(x) if pd.notna(x) else pd.NaT)
+  base = base.sort_values(["PLACA_PADRONIZADA", "KM_ATUAL_NUM", "_TMP_DT"], kind="stable")
+
+  for placa, idxs in base.groupby("PLACA_PADRONIZADA", sort=False).groups.items():
+    idx_list = list(idxs)
+    # Mantém a ordem temporal/odômetro para identificar o abastecimento anterior.
+    idx_list = sorted(idx_list, key=lambda i: (
+        pd.Timestamp(base.at[i, "_TMP_DT"]) if pd.notna(base.at[i, "_TMP_DT"]) else pd.Timestamp("1900-01-01"),
+        float(base.at[i, "KM_ATUAL_NUM"]) if pd.notna(base.at[i, "KM_ATUAL_NUM"]) else float("inf"),
+    ))
+    cand_viagens = por_placa.get(placa)
+    if cand_viagens is None or cand_viagens.empty:
+      for i in idx_list:
+        base.at[i, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO"
+      continue
+
+    for pos, idx in enumerate(idx_list):
+      km_atual = pd.to_numeric(base.at[idx, "KM_ATUAL_NUM"], errors="coerce")
+      if pd.isna(km_atual) or km_atual <= 0:
+        continue
+      if pos == 0:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "SEM ABASTECIMENTO ANTERIOR"
+        continue
+
+      idx_prev = idx_list[pos - 1]
+      km_prev = pd.to_numeric(base.at[idx_prev, "KM_ATUAL_NUM"], errors="coerce")
+      if pd.isna(km_prev) or km_prev >= km_atual:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "CICLO KM INVÁLIDO"
+        continue
+
+      dt_atual = base.at[idx, "_TMP_DT"]
+      dt_prev = base.at[idx_prev, "_TMP_DT"]
+      if pd.isna(dt_atual):
+        dt_atual = base.at[idx, "DATA_NUM"] if "DATA_NUM" in base.columns else pd.NaT
+      if pd.isna(dt_prev):
+        dt_prev = base.at[idx_prev, "DATA_NUM"] if "DATA_NUM" in base.columns else pd.NaT
+      dt_atual = _parse_datetime_flex(dt_atual)
+      dt_prev = _parse_datetime_flex(dt_prev)
+
+      base.at[idx, "KM_ABASTECIMENTO_ANTERIOR"] = float(km_prev)
+      if pd.notna(dt_prev):
+        base.at[idx, "DATA_HORA_ABASTECIMENTO_ANTERIOR"] = dt_prev
+
+      # O ciclo é o intervalo entre o KM do abastecimento anterior e o KM do atual.
+      # Uma viagem candidata deve cruzar esse intervalo e ficar temporalmente entre
+      # os abastecimentos, admitindo até 2 dias após o fim da viagem para o fechamento
+      # do tanque (caso mostrado na ficha: viagem termina dia 30 e abastece dia 31).
+      ciclo_ini = float(km_prev)
+      ciclo_fim = float(km_atual)
+      cand = cand_viagens.copy()
+      cand = cand[(cand["_ODM_MAX"] > ciclo_ini) & (cand["_ODM_MIN"] <= ciclo_fim)].copy()
+
+      if pd.notna(dt_prev):
+        cand = cand[cand["VIAGEM_DATA_FIM"].isna() | (cand["VIAGEM_DATA_FIM"] >= pd.Timestamp(dt_prev) - pd.Timedelta(days=1))]
+      if pd.notna(dt_atual):
+        limite_fim = pd.Timestamp(dt_atual) + pd.Timedelta(days=2)
+        cand = cand[cand["VIAGEM_DATA_INICIO"].isna() | (cand["VIAGEM_DATA_INICIO"] <= limite_fim)]
+
+      if cand.empty:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO NO CICLO"
+        continue
+
+      cand["_MOTORISTA_N"] = cand["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
+      motoristas = sorted([m for m in cand["_MOTORISTA_N"].dropna().unique().tolist() if m])
+      base.at[idx, "VIAGENS_CICLO_QTD"] = int(len(cand))
+      base.at[idx, "VIAGENS_CICLO_MOTORISTAS"] = " | ".join(motoristas)
+
+      # Soma a cobertura de KM do ciclo por motorista. Se somente um motorista
+      # executou o ciclo, a associação é segura mesmo com várias pernas (carregado/vazio).
+      coberturas = {}
+      for _, v in cand.iterrows():
+        inicio = max(float(v["_ODM_MIN"]), ciclo_ini)
+        fim = min(float(v["_ODM_MAX"]), ciclo_fim)
+        cobertura = max(0.0, fim - inicio)
+        mot = v["_MOTORISTA_N"]
+        coberturas[mot] = coberturas.get(mot, 0.0) + cobertura
+
+      if len(motoristas) == 1:
+        motorista_viagem = motoristas[0]
+        escolhido = cand[cand["_MOTORISTA_N"] == motorista_viagem].sort_values(["VIAGEM_DATA_FIM", "_ODM_MAX"], kind="stable").iloc[-1]
+        base.at[idx, "MOTORISTA_VIAGEM"] = motorista_viagem
+        base.at[idx, "MOTORISTA_CONSIDERADO"] = motorista_viagem
+        original = DataUtils.normalizar_texto(base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"])
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "VALIDADO PELO CICLO" if original == motorista_viagem else "CORRIGIDO PELO CICLO"
+        base.at[idx, "VIAGEM_ORIGEM"] = str(escolhido.get("VIAGEM_ORIGEM", ""))
+        base.at[idx, "VIAGEM_DESTINO"] = str(escolhido.get("VIAGEM_DESTINO", ""))
+        base.at[idx, "VIAGEM_ARQUIVO"] = str(escolhido.get("VIAGEM_ARQUIVO", ""))
+        base.at[idx, "VIAGEM_ODM_INICIAL"] = escolhido.get("VIAGEM_ODM_INICIAL", np.nan)
+        base.at[idx, "VIAGEM_ODM_FINAL"] = escolhido.get("VIAGEM_ODM_FINAL", np.nan)
+        base.at[idx, "VIAGEM_KM_TOTAL"] = escolhido.get("VIAGEM_KM_TOTAL", np.nan)
+        base.at[idx, "VIAGEM_DATA_INICIO"] = escolhido.get("VIAGEM_DATA_INICIO", pd.NaT)
+        base.at[idx, "VIAGEM_DATA_FIM"] = escolhido.get("VIAGEM_DATA_FIM", pd.NaT)
+      else:
+        # Não atribuir automaticamente quando o mesmo ciclo contém mais de um motorista.
+        # O abastecimento permanece com o motorista original, mas fica explícito para conferência.
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "PENDENTE DE VALIDAÇÃO — MÚLTIPLOS MOTORISTAS"
+        mot_principal = max(coberturas, key=coberturas.get) if coberturas else ""
+        # Mostra a maior cobertura apenas como referência, sem alterar o responsável.
+        if mot_principal:
+          cand_principal = cand[cand["_MOTORISTA_N"] == mot_principal]
+          if not cand_principal.empty:
+            escolhido = cand_principal.sort_values(["VIAGEM_DATA_FIM", "_ODM_MAX"], kind="stable").iloc[-1]
+            base.at[idx, "VIAGEM_ORIGEM"] = str(escolhido.get("VIAGEM_ORIGEM", ""))
+            base.at[idx, "VIAGEM_DESTINO"] = str(escolhido.get("VIAGEM_DESTINO", ""))
+            base.at[idx, "VIAGEM_ARQUIVO"] = str(escolhido.get("VIAGEM_ARQUIVO", ""))
+            base.at[idx, "VIAGEM_ODM_INICIAL"] = escolhido.get("VIAGEM_ODM_INICIAL", np.nan)
+            base.at[idx, "VIAGEM_ODM_FINAL"] = escolhido.get("VIAGEM_ODM_FINAL", np.nan)
+            base.at[idx, "VIAGEM_KM_TOTAL"] = escolhido.get("VIAGEM_KM_TOTAL", np.nan)
+            base.at[idx, "VIAGEM_DATA_INICIO"] = escolhido.get("VIAGEM_DATA_INICIO", pd.NaT)
+            base.at[idx, "VIAGEM_DATA_FIM"] = escolhido.get("VIAGEM_DATA_FIM", pd.NaT)
+
+  base = base.drop(columns=["_TMP_DT"], errors="ignore")
+  # O cálculo de prêmio usa o motorista considerado; nos casos pendentes, permanece o original.
+  base["CONDUTOR_NORMALIZADO"] = base["MOTORISTA_CONSIDERADO"].apply(DataUtils.normalizar_texto)
+  return base
 
 
 # ================================================================
@@ -1304,7 +2070,32 @@ class RewardEngine:
       if custom_legacy:
         grupo["CATEGORIA_MANUAL"] = grupo["CATEGORIA_MANUAL"].replace("", custom_legacy)
 
-      if eh_folguista and not custom_legacy and not grupo["CATEGORIA_MANUAL"].astype(bool).any():
+      manual_mask = grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != ""
+      categorias_abastecimento = [
+          str(x).strip().upper()
+          for x in grupo.loc[grupo["CATEGORIA_ABASTECIMENTO"].notna(), "CATEGORIA_ABASTECIMENTO"]
+          if str(x).strip()
+      ]
+      categorias_unicas = sorted(set(categorias_abastecimento))
+
+      if manual_mask.any():
+        # Mapeamento manual por placa tem prioridade absoluta.
+        grupo["CATEGORIA_ELEGIVEL"] = np.where(
+            manual_mask,
+            grupo["CATEGORIA_MANUAL"],
+            grupo["CATEGORIA_MANUAL"].replace("", np.nan).ffill().bfill().fillna(
+                tipo_cad if tipo_cad else (categorias_unicas[0] if categorias_unicas else "TRUCK")
+            ),
+        )
+        grupo["USA_CATEGORIA_MANUAL"] = manual_mask
+      elif len(categorias_unicas) == 1:
+        # Quando todos os abastecimentos do motorista são de uma única categoria,
+        # usamos a categoria real da frota/abastecimento. Não deixamos o
+        # TIPO_CADASTRO sobrescrever a categoria efetivamente trabalhada.
+        grupo["CATEGORIA_ELEGIVEL"] = categorias_unicas[0]
+        grupo["USA_CATEGORIA_MANUAL"] = False
+      elif eh_folguista:
+        # Folguista sem mapeamento manual: usa a categoria em que rodou mais KM.
         soma = grupo.groupby("CATEGORIA_ABASTECIMENTO")["KM_CONSUMO"].sum()
         cat_elegivel = (
             soma.idxmax()
@@ -1314,14 +2105,10 @@ class RewardEngine:
         grupo["CATEGORIA_ELEGIVEL"] = cat_elegivel
         grupo["USA_CATEGORIA_MANUAL"] = False
       else:
-        grupo["CATEGORIA_ELEGIVEL"] = np.where(
-            grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != "",
-            grupo["CATEGORIA_MANUAL"],
-            tipo_cad if tipo_cad else grupo["CATEGORIA_ABASTECIMENTO"].iloc[0],
-        )
-        grupo["USA_CATEGORIA_MANUAL"] = (
-            grupo["CATEGORIA_MANUAL"].astype(str).str.strip() != ""
-        )
+        # Para múltiplas categorias sem mapeamento manual, mantemos a categoria
+        # cadastral como fallback para não alterar a regra já existente.
+        grupo["CATEGORIA_ELEGIVEL"] = tipo_cad if tipo_cad else grupo["CATEGORIA_ABASTECIMENTO"].iloc[0]
+        grupo["USA_CATEGORIA_MANUAL"] = False
 
       registros.append(grupo)
 
@@ -1568,6 +2355,25 @@ def _dias_ausencia_por_competencia(
     return acumulado
 
 
+def filtrar_desclassificacoes_competencia(df_desclassificacoes: pd.DataFrame, data_inicio_comp=None, data_fim_comp=None) -> pd.DataFrame:
+  """Retorna somente desclassificações lançadas dentro da competência 26-25.
+
+  A competência é inclusiva no início e no fim. Registros antigos sem DATA_EVENTO
+  são mantidos no histórico, mas não participam do cálculo mensal até receberem
+  uma data, evitando que uma desclassificação de um mês seja carregada para outro.
+  """
+  if df_desclassificacoes is None or df_desclassificacoes.empty:
+    return pd.DataFrame() if df_desclassificacoes is None else df_desclassificacoes.copy()
+  df = df_desclassificacoes.copy()
+  if data_inicio_comp is None or data_fim_comp is None or "DATA_EVENTO" not in df.columns:
+    return df
+  ini = pd.Timestamp(data_inicio_comp).normalize()
+  fim = pd.Timestamp(data_fim_comp).normalize()
+  datas = df["DATA_EVENTO"].apply(parse_data_filtro)
+  mask = datas.notna() & (datas >= ini) & (datas <= fim)
+  return df.loc[mask].copy()
+
+
 def aplicar_regras_gerais(
     df_resumo_original: pd.DataFrame,
     df_ausencias: pd.DataFrame,
@@ -1622,13 +2428,20 @@ def aplicar_regras_gerais(
     res["DIAS_EFETIVOS"] = 30
     res["PREMIO"] = res["PREMIO_BRUTO"]
 
+  # Desclassificações são eventos mensais: somente lançamentos da competência
+  # atual podem afetar o prêmio. Isso impede que um evento de agosto permaneça
+  # ativo na competência seguinte.
+  df_desclassificacoes_comp = filtrar_desclassificacoes_competencia(
+      df_desclassificacoes, data_inicio_comp, data_fim_comp
+  )
+
   if (
-      not df_desclassificacoes.empty
-      and "MOTORISTA" in df_desclassificacoes.columns
+      not df_desclassificacoes_comp.empty
+      and "MOTORISTA" in df_desclassificacoes_comp.columns
   ):
     for idx in res.index:
       m_nome = res.at[idx, "MOTORISTA"]
-      g = df_desclassificacoes[df_desclassificacoes["MOTORISTA"] == m_nome]
+      g = df_desclassificacoes_comp[df_desclassificacoes_comp["MOTORISTA"] == m_nome]
       if not g.empty:
         motivos_pilar1 = []
         diretos = g[g["TIPO_IMPACTO"] == "DESCLASSIFICADO"]
@@ -1682,39 +2495,78 @@ def aplicar_regras_gerais(
 # GERADOR DE DATAFRAME EXCLUSIVO DO RH
 # ================================================================
 def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
-  if df_resumo.empty or "MOTORISTA" not in df_resumo.columns:
-    return pd.DataFrame(columns=["NOME", "FILIAL", "VALOR PAGO"])
+  """Gera o relatório do RH a partir do cadastro oficial completo.
 
-  if "STATUS_MOTORISTA" in df_resumo.columns:
-    df_rh = df_resumo[df_resumo["STATUS_MOTORISTA"] == "ATIVO"].copy()
-  else:
-    df_rh = df_resumo.copy()
+  Regra: todo motorista ATIVO no cadastro oficial deve aparecer no RH,
+  mesmo sem abastecimento, sem consumo válido, em férias ou atestado.
+  Quando não houver prêmio calculado para a competência, o valor fica R$ 0,00.
+  A filial e o código funcional vêm exclusivamente da Gestão de Cadastros.
+  """
+  colunas_saida = ["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO"]
 
-  if "CODIGO_FUNCIONAL" not in df_rh.columns:
-    codigos = carregar_codigos_funcionais()
-    df_rh["CODIGO_FUNCIONAL"] = df_rh["MOTORISTA"].apply(
-        lambda x: codigos.get(DataUtils.normalizar_texto(x), "")
+  try:
+    cad_rh = (cadastro_all.copy() if isinstance(globals().get("cadastro_all"), pd.DataFrame)
+              else cadastro.copy() if isinstance(globals().get("cadastro"), pd.DataFrame)
+              else pd.DataFrame())
+    if cad_rh.empty:
+      return pd.DataFrame(columns=colunas_saida)
+
+    # Somente motoristas ativos entram no RH. Férias/atestado não alteram o status cadastral.
+    if "STATUS" in cad_rh.columns:
+      cad_rh = cad_rh[
+          cad_rh["STATUS"].fillna("ATIVO").astype(str).str.strip().str.upper().eq("ATIVO")
+      ].copy()
+
+    # Usuário de consulta vê somente os ativos da filial autorizada.
+    if not is_admin and FILIAL_ACESSO not in ("", "TODAS") and "BASE_CADASTRO" in cad_rh.columns:
+      cad_rh = cad_rh[
+          cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto) == FILIAL_ACESSO
+      ].copy()
+
+    cad_rh["_MOTORISTA_RH"] = cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
+    cad_rh = cad_rh[cad_rh["_MOTORISTA_RH"].ne("")].copy()
+    cad_rh = cad_rh.drop_duplicates("_MOTORISTA_RH", keep="last")
+
+    # Resultado da competência, quando existir. Ausentes do cálculo recebem zero.
+    calc = df_resumo.copy() if isinstance(df_resumo, pd.DataFrame) else pd.DataFrame()
+    if not calc.empty and "MOTORISTA" in calc.columns:
+      calc["_MOTORISTA_RH"] = calc["MOTORISTA"].apply(DataUtils.normalizar_texto)
+      if "PREMIO" not in calc.columns:
+        calc["PREMIO"] = 0.0
+      calc["PREMIO"] = pd.to_numeric(calc["PREMIO"], errors="coerce").fillna(0.0)
+      # O prêmio já é o valor final após regras/descontos.
+      premio_por_motorista = calc.groupby("_MOTORISTA_RH", as_index=False)["PREMIO"].sum()
+    else:
+      premio_por_motorista = pd.DataFrame(columns=["_MOTORISTA_RH", "PREMIO"])
+
+    rh = cad_rh[["_MOTORISTA_RH", "MOTORISTA_CADASTRO", "BASE_CADASTRO", "CODIGO_FUNCIONAL"]].copy()
+    rh = rh.merge(premio_por_motorista, on="_MOTORISTA_RH", how="left")
+    rh["PREMIO"] = pd.to_numeric(rh["PREMIO"], errors="coerce").fillna(0.0)
+    rh["CODIGO_FUNCIONAL"] = rh["CODIGO_FUNCIONAL"].fillna("").astype(str).str.strip()
+
+    # Fallback somente para códigos já cadastrados no arquivo auxiliar durante a transição.
+    codigos_fallback = carregar_codigos_funcionais()
+    rh["CODIGO_FUNCIONAL"] = rh.apply(
+        lambda r: r["CODIGO_FUNCIONAL"] if r["CODIGO_FUNCIONAL"] else codigos_fallback.get(r["_MOTORISTA_RH"], ""),
+        axis=1,
     )
 
-  rh_df = pd.DataFrame()
-  rh_df["CÓDIGO FUNCIONAL"] = df_rh.get("CODIGO_FUNCIONAL", "")
-  rh_df["NOME"] = df_rh["MOTORISTA"]
-  rh_df["FILIAL"] = df_rh["BASE"].fillna("CIANORTE")
+    def formatar_valor_pago(x):
+      try:
+        return f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+      except Exception:
+        return "R$ 0,00"
 
-  def formatar_valor_pago(x):
-    if pd.isna(x):
-      return "R$ 0,00"
-    try:
-      return (
-          f"R$ {float(x):,.2f}".replace(",", "X")
-          .replace(".", ",")
-          .replace("X", ".")
-      )
-    except Exception:
-      return "R$ 0,00"
-
-  rh_df["VALOR PAGO"] = df_rh["PREMIO"].map(formatar_valor_pago)
-  return rh_df
+    out = pd.DataFrame({
+        "CÓDIGO FUNCIONAL": rh["CODIGO_FUNCIONAL"],
+        "NOME": rh["MOTORISTA_CADASTRO"],
+        "FILIAL": rh["BASE_CADASTRO"].fillna("").astype(str),
+        "VALOR PAGO": rh["PREMIO"].map(formatar_valor_pago),
+    })
+    return out.sort_values(["FILIAL", "NOME"], kind="stable").reset_index(drop=True)
+  except Exception as exc:
+    print(f"Erro ao gerar tabela RH completa: {exc}")
+    return pd.DataFrame(columns=colunas_saida)
 
 
 def estilizar_rh_zerados(df: pd.DataFrame):
@@ -1894,7 +2746,31 @@ def aplicar_filtros(
   if pd.isna(tot_media_geral):
     tot_media_geral = 0.0
 
-  tot_mots = len(res_f)
+  # KPI de motoristas: fonte exclusiva = cadastro oficial completo.
+  # Não depende de abastecimento, consumo, férias, atestado ou prêmio calculado.
+  cad_kpi = cadastro_all.copy() if isinstance(globals().get("cadastro_all"), pd.DataFrame) else (cadastro.copy() if isinstance(cadastro, pd.DataFrame) else pd.DataFrame())
+  if not is_admin and FILIAL_ACESSO not in ("", "TODAS"):
+    cad_kpi = cad_kpi[
+        cad_kpi["BASE_CADASTRO"].apply(DataUtils.normalizar_texto) == FILIAL_ACESSO
+    ].copy()
+  if not cad_kpi.empty:
+    if "STATUS" in cad_kpi.columns:
+      cad_kpi = cad_kpi[
+          cad_kpi["STATUS"].fillna("ATIVO").astype(str).str.strip().str.upper().eq("ATIVO")
+      ].copy()
+    if motorista and motorista != "TODOS":
+      m_kpi = DataUtils.normalizar_texto(motorista)
+      cad_kpi = cad_kpi[
+          cad_kpi["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto) == m_kpi
+      ]
+    if filial and filial != "TODAS" and (is_admin or FILIAL_ACESSO in ("", "TODAS")):
+      f_kpi = DataUtils.normalizar_texto(filial)
+      cad_kpi = cad_kpi[
+          cad_kpi["BASE_CADASTRO"].apply(DataUtils.normalizar_texto) == f_kpi
+      ]
+    tot_mots = int(cad_kpi["MOTORISTA_CADASTRO"].nunique())
+  else:
+    tot_mots = 0
 
   res_view = res_f.copy()
   if not res_view.empty:
@@ -2026,6 +2902,17 @@ def gerar_html_unico_recibo(
       .replace("X", ".")
   )
 
+  eventos_jornada = int(pd.to_numeric(row_data.get("EVENTOS_CONTROLE_JORNADA", 0), errors="coerce") or 0)
+  eventos_excesso = int(pd.to_numeric(row_data.get("EVENTOS_EXCESSO_VELOCIDADE", 0), errors="coerce") or 0)
+  desconto_jornada = float(pd.to_numeric(row_data.get("DESCONTO_CONTROLE_JORNADA", 0), errors="coerce") or 0)
+  desconto_excesso = float(pd.to_numeric(row_data.get("DESCONTO_EXCESSO_VELOCIDADE", 0), errors="coerce") or 0)
+  total_controles = eventos_jornada + eventos_excesso
+  valor_total_controles = desconto_jornada + desconto_excesso
+  percentual_controles = (100.0 if eventos_jornada >= 130 or eventos_excesso > 30 else 0.0)
+  valor_total_controles_str = (
+      f"R$ {valor_total_controles:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+  )
+
   motivo_descl = row_data.get(
       "MOTIVO_DESCLASSIFICACAO", "Elegível / Em conformidade"
   )
@@ -2084,11 +2971,11 @@ def gerar_html_unico_recibo(
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">JORNADA</td>
-                <td style="padding: 4px 8px; text-align: center;">0</td>
+                <td style="padding: 4px 8px; text-align: center;">{eventos_jornada}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">EXCESSO DE VELOCIDADE</td>
-                <td style="padding: 4px 8px; text-align: center;">0</td>
+                <td style="padding: 4px 8px; text-align: center;">{eventos_excesso}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">KM RODADO</td>
@@ -2108,19 +2995,19 @@ def gerar_html_unico_recibo(
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">130</td>
+                <td style="padding: 4px 8px; text-align: center;">{total_controles}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR TOTAL CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+                <td style="padding: 4px 8px; text-align: center;">{valor_total_controles_str}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">% CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">100%</td>
+                <td style="padding: 4px 8px; text-align: center;">{percentual_controles:.0f}%</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">R$ CONTROLES</td>
-                <td style="padding: 4px 8px; text-align: center;">R$ 0,00</td>
+                <td style="padding: 4px 8px; text-align: center;">{valor_total_controles_str}</td>
             </tr>
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">VALOR MÉDIA</td>
@@ -2190,29 +3077,18 @@ def gerar_recibos_lote(
   else:
     lista_mots = [motorista_sel]
 
-  recibos_html = [f"""
-    <style>
-    @media print {{
-        body * {{ visibility: hidden; }}
-        .recibo-container, .recibo-container * {{ visibility: visible; }}
-        .recibo-container {{ position: absolute; left: 0; top: 0; width: 100%; }}
-        .no-print {{ display: none !important; }}
-    }}
-    </style>
-    <div class="no-print" style="background: #F8FAFC; border: 1px solid #E2E8F0; padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 14px; font-weight: bold; color: #1E293B;">
-            📄 Total de Recibos Prontos: <span style="color: #2563EB;">{len(lista_mots)}</span>
-        </span>
-        <button onclick="window.print()" style="background-color: #2563EB; color: #FFFFFF; border: none; padding: 8px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            🖨️ Imprimir Todos os Recibos ({len(lista_mots)})
-        </button>
-    </div>
-    """]
+  recibos_html = []
 
   cards_html = []
   for m_nome in lista_mots:
-    row = res_f[res_f["MOTORISTA"] == m_nome]
+    row = res_f[res_f["MOTORISTA"] == m_nome].copy()
     if not row.empty:
+      # O recibo usa o resultado final consolidado do motorista.
+      # Se houver duplicidade residual, prioriza o registro com maior prêmio e
+      # status final de cálculo, evitando pegar uma linha intermediária.
+      if "PREMIO" in row.columns:
+        row["_PREMIO_NUM"] = pd.to_numeric(row["PREMIO"], errors="coerce").fillna(0.0)
+        row = row.sort_values(["_PREMIO_NUM"], ascending=False)
       card_html = gerar_html_unico_recibo(
           row.iloc[0], m_nome, periodo_ini, periodo_fim, fator_c
       )
@@ -2225,14 +3101,42 @@ def gerar_recibos_lote(
         " Inativo).</div>"
     )
 
-  return (
-      "".join(recibos_html)
-      + "<div class='recibo-container' style='display: flex; flex-direction:"
-      " column; gap: 30px;'>"
-      + "".join(cards_html)
-      + "</div>"
-  )
-
+  cards = "".join(cards_html)
+  cards_b64 = base64.b64encode(cards.encode("utf-8")).decode("ascii")
+  controls_html = f"""
+    <div class="no-print" style="background:#F8FAFC;border:1px solid #CBD5E1;padding:12px 18px;border-radius:10px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:16px;">
+      <div style="font-size:14px;font-weight:700;color:#17215C;">📄 {len(lista_mots)} recibo(s) pronto(s)</div>
+      <button id="printRecibosBtn" style="background:#17215C;color:#FFFFFF;border:0;padding:10px 18px;border-radius:8px;font-weight:800;cursor:pointer;font-size:13px;">🖨️ Imprimir recibo(s)</button>
+    </div>
+    <script>
+    (() => {{
+      const btn = document.getElementById('printRecibosBtn');
+      if (!btn) return;
+      const b64 = '{cards_b64}';
+      btn.addEventListener('click', () => {{
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const html = new TextDecoder('utf-8').decode(bytes);
+        const w = window.open('', '_blank', 'width=1000,height=800');
+        if (!w) {{
+          alert('O navegador bloqueou a janela de impressão. Libere os pop-ups para este site e tente novamente.');
+          return;
+        }}
+        w.document.open();
+        w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Recibos de Premiação</title><style>
+          @page {{ size:A4; margin:10mm; }}
+          * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+          html,body {{ margin:0; padding:0; background:#fff; color:#000; font-family:Arial,sans-serif; }}
+          .recibo-container {{ width:100%; }}
+          .recibo-card {{ break-after:page; page-break-after:always; box-shadow:none !important; margin:0 auto !important; }}
+          .recibo-card:last-child {{ break-after:auto; page-break-after:auto; }}
+        </style></head><body><div class="recibo-container">${{html}}</div><script>window.onload=()=>{{setTimeout(()=>window.print(),350);}}<\/script></body></html>`);
+        w.document.close();
+        w.focus();
+      }});
+    }})();
+    </script>
+  """
+  return controls_html + "<div class='recibo-container' style='display:flex;flex-direction:column;gap:30px;'>" + cards + "</div>"
 
 
 
@@ -2355,18 +3259,51 @@ section[data-testid="stSidebar"] input{background:#F8FBFF!important;color:#11182
 </style>
 """, unsafe_allow_html=True)
 
+def _mtime_arquivo(nome):
+    try:
+        return os.path.getmtime(nome)
+    except Exception:
+        return 0.0
+
+# Garante que o cadastro persistente seja populado com o conjunto legado + atual uma única vez.
+# Depois dessa migração, Pasta4.xlsx não é consultada em runtime.
+_migracao_cadastro_count = migrar_cadastro_legado_uma_vez()
+
+# O cache do Streamlit agora depende do horário de alteração dos arquivos-base.
+# Assim, quando a planilha receber novos abastecimentos (inclusive 25/08),
+# a aplicação recarrega automaticamente sem ficar presa à versão antiga da base.
+_CACHE_BASE_TOKEN = (
+    _mtime_arquivo("Pasta2.xlsx"),
+    _mtime_arquivo("frota.xlsx"),
+    _token_arquivos_abastecimentos_mensais(),
+    _token_arquivos_viagens(),
+    _token_arquivos_velocidade(),
+    tuple(
+        (nome, _mtime_arquivo(os.path.join(DATA_DIR if DATA_DIR and DATA_DIR != "." else ".", nome)))
+        for nome in sorted([
+            n for n in os.listdir(DATA_DIR if DATA_DIR and DATA_DIR != "." else ".")
+            if re.fullmatch(r"historico_abastecimentos_\d{2}\d{4}\.csv", n, flags=re.IGNORECASE)
+        ])
+    ),
+)
+
 @st.cache_resource(show_spinner=False)
-def carregar_base():
+def carregar_base(cache_token=None):
     config = AppConfig(); config.verificar_arquivos()
     loader = DataLoader(config); engine = RewardEngine()
     precos = loader.carregar_precos()
     frota, mapa_frota = loader.carregar_frota()
     cadastro = loader.carregar_cadastro_motoristas()
-    abastecimentos = loader.carregar_abastecimentos(mapa_frota)
+    _arquivar_abastecimentos_mensais(mapa_frota)
+    abastecimentos = _carregar_historico_abastecimentos_total()
+    if abastecimentos.empty:
+      abastecimentos = loader.carregar_abastecimentos(mapa_frota)
+    viagens = loader.carregar_viagens()
+    abastecimentos = associar_motorista_viagem(abastecimentos, viagens)
     eventos = engine.calcular_eventos_consumo(abastecimentos)
     return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
 
-config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base()
+config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
 cadastro_all = cadastro.copy()
 
 # Restringe todo o aplicativo à filial vinculada ao usuário de consulta.
@@ -2378,6 +3315,7 @@ if not is_admin and FILIAL_ACESSO not in ("", "TODAS"):
 
 if "ausencias" not in st.session_state: st.session_state.ausencias = carregar_ausencias()
 if "desclassificacoes" not in st.session_state: st.session_state.desclassificacoes = carregar_desclassificacoes()
+if "categorias_vigencia" not in st.session_state: st.session_state.categorias_vigencia = carregar_categorias_vigencia()
 if "mapa_cat_custom" not in st.session_state: st.session_state.mapa_cat_custom = carregar_categorias_customizadas()
 if "excesso_velocidade" not in st.session_state: st.session_state.excesso_velocidade = carregar_excesso_velocidade()
 if "controle_jornada" not in st.session_state: st.session_state.controle_jornada = carregar_controle_jornada()
@@ -2392,10 +3330,13 @@ def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
     di = dt_ini.strftime('%d/%m/%Y') if isinstance(dt_ini, date) else str(dt_ini)
     df = dt_fim.strftime('%d/%m/%Y') if isinstance(dt_fim, date) else str(dt_fim)
     base = aplicar_filtros(di, df, motorista, placa, categoria, filial, st.session_state.ausencias, st.session_state.desclassificacoes, st.session_state.mapa_cat_custom)
+
     def _eventos_no_periodo(df_eventos):
         if df_eventos is None or df_eventos.empty:
             return df_eventos
         tmp = df_eventos.copy()
+        if "DATA_EVENTO" not in tmp.columns:
+            return pd.DataFrame()
         datas = tmp["DATA_EVENTO"].apply(parse_data_filtro)
         ini = pd.Timestamp(dt_ini).normalize() if isinstance(dt_ini, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_ini)
         fim = pd.Timestamp(dt_fim).normalize() if isinstance(dt_fim, (date, datetime, pd.Timestamp)) else parse_data_filtro(dt_fim)
@@ -2405,11 +3346,40 @@ def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
         if fim is not None and pd.notna(fim):
             mask &= datas <= pd.Timestamp(fim).normalize()
         return tmp.loc[mask].copy()
-    return recalcular_saida_dashboard(
-        base,
-        _eventos_no_periodo(st.session_state.excesso_velocidade),
-        _eventos_no_periodo(st.session_state.controle_jornada),
-    )
+
+    # EXCESSO DE VELOCIDADE: o extrato oficial da competência substitui
+    # os lançamentos manuais daquela competência quando encontrado.
+    automatico = carregar_excesso_velocidade_automatico(dt_ini, dt_fim)
+    if automatico is not None and not automatico.empty:
+        auto = automatico.copy()
+        # A categoria do desconto segue a categoria calculada para o motorista.
+        mapa_cat = {}
+        if len(base) > 0 and isinstance(base[-1], pd.DataFrame) and not base[-1].empty:
+            rr = base[-1].copy()
+            if "MOTORISTA" in rr.columns and "CATEGORIA" in rr.columns:
+                mapa_cat = {DataUtils.normalizar_texto(m): normalizar_categoria_evento(c)
+                            for m,c in zip(rr["MOTORISTA"], rr["CATEGORIA"]) if str(m).strip()}
+        if "CATEGORIA" not in auto.columns:
+            auto["CATEGORIA"] = ""
+        auto["CATEGORIA"] = auto["MOTORISTA"].map(mapa_cat).fillna("")
+        # Fallback para o cadastro oficial, caso o motorista não esteja no resumo.
+        if "CATEGORIA" in auto.columns:
+            mapa_cad = {}
+            try:
+                for _,r in cadastro.iterrows():
+                    mapa_cad[DataUtils.normalizar_texto(r.get("MOTORISTA_CADASTRO",""))] = normalizar_categoria_evento(r.get("TIPO_CADASTRO",""))
+            except Exception:
+                mapa_cad = {}
+            auto["CATEGORIA"] = auto.apply(
+                lambda r: r["CATEGORIA"] if str(r.get("CATEGORIA"," ")).strip() else mapa_cad.get(DataUtils.normalizar_texto(r.get("MOTORISTA","")), ""),
+                axis=1,
+            )
+        df_excesso = auto
+    else:
+        df_excesso = _eventos_no_periodo(st.session_state.excesso_velocidade)
+
+    df_jornada = _eventos_no_periodo(st.session_state.controle_jornada)
+    return recalcular_saida_dashboard(base, df_excesso, df_jornada)
 
 
 def _motoristas_filial(df):
@@ -2422,11 +3392,43 @@ def _motoristas_filial(df):
         return tmp[tmp["MOTORISTA"].fillna("").apply(DataUtils.normalizar_texto).isin(nomes)].copy()
     return tmp
 
+def filtrar_ausencias_competencia(df_ausencias, data_inicio_comp, data_fim_comp):
+    """Mostra somente afastamentos que tenham interseção com a competência 26-25.
+
+    Ex.: 04/08-25/08 aparece em agosto e não aparece em setembro.
+    Ex.: 04/08-02/09 aparece em agosto com 22 dias e em setembro com 8 dias.
+    """
+    if df_ausencias is None or df_ausencias.empty:
+        return pd.DataFrame(columns=list(df_ausencias.columns) if df_ausencias is not None else [])
+    ini = pd.Timestamp(data_inicio_comp).normalize()
+    fim = pd.Timestamp(data_fim_comp).normalize()
+    linhas=[]
+    for idx,row in df_ausencias.reset_index().rename(columns={"index":"_INDICE_ORIGINAL"}).iterrows():
+        di=parse_data_filtro(row.get("DATA_INICIO","")); df=parse_data_filtro(row.get("DATA_FIM",""))
+        if di is None: continue
+        di=pd.Timestamp(di).normalize()
+        if df is None:
+            n=pd.to_numeric(row.get("DIAS",0),errors="coerce")
+            try: n=int(n)
+            except Exception: n=0
+            if n<=0: continue
+            df=di+pd.Timedelta(days=n-1)
+        else: df=pd.Timestamp(df).normalize()
+        if df < di: continue
+        inter_ini=max(di,ini); inter_fim=min(df,fim)
+        if inter_ini <= inter_fim:
+            novo=row.copy()
+            novo["DIAS_COMPETENCIA"]=int((inter_fim-inter_ini).days+1)
+            novo["_INDICE_ORIGINAL"]=int(row["_INDICE_ORIGINAL"])
+            linhas.append(novo)
+    if not linhas: return pd.DataFrame(columns=list(df_ausencias.columns)+["DIAS_COMPETENCIA","_INDICE_ORIGINAL"])
+    return pd.DataFrame(linhas)
+
 def ausencia_label(i, row):
     return f"[{i}] {row.get('MOTORISTA','')} — {row.get('TIPO_AUSENCIA','')} — {row.get('DATA_INICIO','')} até {row.get('DATA_FIM','')} ({row.get('DIAS',0)} dias)"
 
 def descl_label(i, row):
-    return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()}"
+    return f"[{i}] {row.get('MOTORISTA','')} — {str(row.get('CRITERIO','')).split('[',1)[0].strip()} — {row.get('DATA_EVENTO','')}"
 
 def competencia_26_25(data_ref):
     """Retorna o início e o fim da competência que vai do dia 26 ao dia 25."""
@@ -2462,11 +3464,14 @@ competencia_padrao = next(
     competencias_labels[-1] if competencias_labels else ""
 )
 competencia_lookup = {label: (ini_c, fim_c) for label, ini_c, fim_c in competencias_disponiveis}
+competencia_padrao_ini, competencia_padrao_fim = competencia_lookup.get(competencia_padrao, (min_dt, max_dt))
+st.session_state.mapa_cat_custom = categorias_ativas_na_competencia(st.session_state.categorias_vigencia, competencia_padrao_ini, competencia_padrao_fim)
 
 # Valores iniciais para os filtros
 initial = aplicar_filtros_st(min_dt, max_dt, "TODOS", "", "TODAS", "TODAS")
 res_initial = initial[-1]
-mots_lista = ["TODOS"] + sorted(res_initial["MOTORISTA"].dropna().unique().tolist())
+mots_cad_iniciais = cadastro_all[cadastro_all.get("STATUS", "ATIVO").astype(str).str.upper().eq("ATIVO")] if "STATUS" in cadastro_all.columns else cadastro_all.copy()
+mots_lista = ["TODOS"] + sorted(mots_cad_iniciais["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
 cats_lista = ["TODAS"] + sorted(res_initial["CATEGORIA"].dropna().unique().tolist())
 filiais_lista = ([FILIAL_ACESSO] if (not is_admin and FILIAL_ACESSO not in ("", "TODAS")) else ["TODAS"] + sorted([str(x) for x in cadastro["BASE_CADASTRO"].dropna().unique() if str(x).strip()]) )
 
@@ -2498,6 +3503,7 @@ with st.sidebar:
         help="Ex.: Competência 08/2026 = 26/07/2026 a 25/08/2026."
     )
     dt_ini, dt_fim = competencia_lookup.get(competencia_selecionada, (min_dt, max_dt))
+    st.session_state.mapa_cat_custom = categorias_ativas_na_competencia(st.session_state.categorias_vigencia, dt_ini, dt_fim)
 
     st.markdown(
         f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
@@ -2606,21 +3612,145 @@ with tabs[0]:
             st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(evdf,"⚠️ Eventos dos Pilares",_int,"#D66D00",2.0),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
 with tabs[1]:
-    if is_admin:
-        st.subheader("Resumo de Premiações")
-        st.dataframe(res_view,use_container_width=True,hide_index=True)
+    st.subheader("📊 Resumo de Abastecimentos")
+    st.caption(
+        f"Visão consolidada dos abastecimentos da competência "
+        f"{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}, "
+        "respeitando os filtros e a filial autorizada do usuário."
+    )
+
+    # KM/Média: usamos os eventos calculados na base COMPLETA, mas restringimos
+    # exatamente aos abastecimentos que aparecem em det_view (já filtrados por
+    # competência + usuário/filial + motorista + placa + categoria).
+    # Assim o KM_ANTERIOR continua vindo do histórico da placa, sem misturar
+    # outras filiais/motoristas com o resumo atual.
+    evt_resumo = eventos.copy() if eventos is not None else pd.DataFrame()
+    if not evt_resumo.empty and det_view is not None and not det_view.empty:
+        if "ID_ABASTECIMENTO" in evt_resumo.columns and "ID_ABASTECIMENTO" in det_view.columns:
+            ids_periodo = set(det_view["ID_ABASTECIMENTO"].fillna("").astype(str).tolist())
+            evt_resumo = evt_resumo[
+                evt_resumo["ID_ABASTECIMENTO"].fillna("").astype(str).isin(ids_periodo)
+            ].copy()
+        else:
+            # Fallback para bases antigas.
+            evt_resumo = aplicar_periodo(evt_resumo) if 'aplicar_periodo' in globals() else evt_resumo
+
+    ab_km = 0.0
+    ab_litros = 0.0
+    ab_gasto = 0.0
+    ab_qtd = len(det_view) if det_view is not None else 0
+
+    if not evt_resumo.empty:
+        evt_validos = (
+            evt_resumo[evt_resumo["REGISTRO_CONSUMO_VALIDO"]].copy()
+            if "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns
+            else evt_resumo.copy()
+        )
+        if "KM_CONSUMO" in evt_validos.columns:
+            ab_km = float(pd.to_numeric(evt_validos["KM_CONSUMO"], errors="coerce").fillna(0).sum())
+
+    # Litros e gasto são os abastecimentos efetivamente exibidos no resumo.
+    # Não usamos a soma de todos os eventos da base, para não misturar outras
+    # filiais/motoristas.
+    if det_view is not None and not det_view.empty:
+        if "QTDE_NUM" in det_view.columns:
+            ab_litros = float(pd.to_numeric(det_view["QTDE_NUM"], errors="coerce").fillna(0).sum())
+        if "VALOR_NUM" in det_view.columns:
+            ab_gasto = float(pd.to_numeric(det_view["VALOR_NUM"], errors="coerce").fillna(0).sum())
+
+    ab_media = (ab_km / ab_litros) if ab_litros > 0 else 0.0
+
+    def _fmt_brl(v):
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _fmt_num(v, dec=1):
+        return f"{float(v):,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("⛽ Abastecimentos", f"{ab_qtd:,}".replace(",", "."))
+    a2.metric("💰 Gasto com Combustível", _fmt_brl(ab_gasto))
+    a3.metric("📍 KM", f"{_fmt_num(ab_km,1)} km")
+    a4.metric("🧪 Litros", f"{_fmt_num(ab_litros,1)} L")
+    a5.metric("🎯 Média", f"{_fmt_num(ab_media,2)} km/L")
+
+    if det_view is not None and not det_view.empty:
+        resumo_abast = det_view.copy()
+        nome_col = "CONDUTOR_NORMALIZADO" if "CONDUTOR_NORMALIZADO" in resumo_abast.columns else None
+        if nome_col:
+            resumo_abast["MOTORISTA"] = resumo_abast[nome_col].astype(str)
+        else:
+            resumo_abast["MOTORISTA"] = "SEM MOTORISTA"
+
+        # KM/L por motorista usa somente os eventos selecionados acima.
+        evt_mot = (
+            evt_resumo[evt_resumo["REGISTRO_CONSUMO_VALIDO"]].copy()
+            if (not evt_resumo.empty and "REGISTRO_CONSUMO_VALIDO" in evt_resumo.columns)
+            else evt_resumo.copy()
+        )
+        if not evt_mot.empty:
+            evt_mot["MOTORISTA"] = evt_mot["CONDUTOR_NORMALIZADO"].astype(str)
+            km_agg = evt_mot.groupby("MOTORISTA", as_index=False).agg(
+                KM=("KM_CONSUMO", "sum"),
+                LITROS_VALIDOS=("LITROS_CONSUMO", "sum"),
+            )
+            # Para o resumo, os litros do motorista devem refletir todos os
+            # abastecimentos exibidos, mesmo quando o primeiro abastecimento
+            # daquela placa não pode gerar KM de consumo.
+            litros_det = resumo_abast.groupby("MOTORISTA", as_index=False)["QTDE_NUM"].sum().rename(columns={"QTDE_NUM": "LITROS"})
+            km_agg = km_agg.drop(columns=["LITROS_VALIDOS"], errors="ignore").merge(litros_det, on="MOTORISTA", how="outer")
+        else:
+            km_agg = pd.DataFrame(columns=["MOTORISTA", "KM", "LITROS"])
+
+        resumo_motorista = resumo_abast.groupby("MOTORISTA", as_index=False).agg(ABASTECIMENTOS=("MOTORISTA", "size"))
+        if not km_agg.empty:
+            gasto_mot = resumo_abast.groupby("MOTORISTA", as_index=False)["VALOR_NUM"].sum().rename(columns={"VALOR_NUM":"GASTO"}) if "VALOR_NUM" in resumo_abast.columns else pd.DataFrame(columns=["MOTORISTA","GASTO"])
+            resumo_motorista = resumo_motorista.merge(km_agg, on="MOTORISTA", how="left").merge(gasto_mot, on="MOTORISTA", how="left")
+        else:
+            resumo_motorista["KM"] = 0.0
+            resumo_motorista["LITROS"] = 0.0
+            resumo_motorista["GASTO"] = 0.0
+        if "KM" in resumo_motorista.columns and "LITROS" in resumo_motorista.columns:
+            resumo_motorista["MÉDIA KM/L"] = (
+                pd.to_numeric(resumo_motorista["KM"], errors="coerce").fillna(0) /
+                pd.to_numeric(resumo_motorista["LITROS"], errors="coerce").replace(0, pd.NA)
+            ).fillna(0)
+        else:
+            resumo_motorista["MÉDIA KM/L"] = 0.0
+
+        sort_col = "GASTO" if "GASTO" in resumo_motorista.columns else "ABASTECIMENTOS"
+        resumo_motorista = resumo_motorista.sort_values(sort_col, ascending=False)
+
+        if "GASTO" in resumo_motorista.columns:
+            resumo_motorista["GASTO"] = resumo_motorista["GASTO"].map(_fmt_brl)
+        if "KM" in resumo_motorista.columns:
+            resumo_motorista["KM"] = resumo_motorista["KM"].map(lambda x: f"{_fmt_num(x,1)} km")
+        if "LITROS" in resumo_motorista.columns:
+            resumo_motorista["LITROS"] = resumo_motorista["LITROS"].map(lambda x: f"{_fmt_num(x,1)} L")
+        resumo_motorista["MÉDIA KM/L"] = resumo_motorista["MÉDIA KM/L"].map(lambda x: _fmt_num(x,2))
+
+        st.markdown("#### 👥 Resumo por Motorista")
+        st.dataframe(resumo_motorista, use_container_width=True, hide_index=True)
+
+        st.markdown("#### ⛽ Últimos abastecimentos do período")
+        colunas_abast = [c for c in ["DATA_FILTRO", "CONDUTOR_NORMALIZADO", "PLACA_PADRONIZADA", "TIPO", "KM_ATUAL_NUM", "QTDE_NUM", "VALOR_NUM"] if c in resumo_abast.columns]
+        sort_cols = [c for c in ["DATA_FILTRO", "_ORDEM_ORIGINAL"] if c in resumo_abast.columns]
+        ultimos = resumo_abast.sort_values(sort_cols, ascending=True) if sort_cols else resumo_abast.copy()
+        if colunas_abast:
+            exib = ultimos[colunas_abast].tail(20).copy().rename(columns={
+                "DATA_FILTRO":"DATA", "CONDUTOR_NORMALIZADO":"MOTORISTA", "PLACA_PADRONIZADA":"PLACA",
+                "TIPO":"CATEGORIA", "KM_ATUAL_NUM":"KM", "QTDE_NUM":"LITROS", "VALOR_NUM":"VALOR"
+            })
+            if "DATA" in exib.columns:
+                exib["DATA"] = exib["DATA"].apply(lambda x: x.strftime("%d/%m/%Y") if hasattr(x, "strftime") else str(x))
+            if "KM" in exib.columns:
+                exib["KM"] = pd.to_numeric(exib["KM"], errors="coerce").fillna(0).map(lambda x: _fmt_num(x,1))
+            if "LITROS" in exib.columns:
+                exib["LITROS"] = pd.to_numeric(exib["LITROS"], errors="coerce").fillna(0).map(lambda x: _fmt_num(x,1))
+            if "VALOR" in exib.columns:
+                exib["VALOR"] = pd.to_numeric(exib["VALOR"], errors="coerce").fillna(0).map(_fmt_brl)
+            st.dataframe(exib, use_container_width=True, hide_index=True)
     else:
-        st.subheader("Gestão de Cadastros — somente consulta")
-        st.info("Seu perfil tem acesso somente para consulta. Alterações de motoristas, placas, datas e códigos funcionais estão disponíveis apenas para Administradores.")
-        cadastro_exib = cadastro.copy()
-        if "STATUS" in cadastro_exib.columns:
-            cadastro_exib["STATUS"] = cadastro_exib["STATUS"].replace({"ATIVO": "🟢 ATIVO", "INATIVO": "🔴 INATIVO"})
-        st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
-        st.markdown("##### 🚚 Placas cadastradas")
-        frota_exib = frota.copy()
-        if "STATUS" in frota_exib.columns:
-            frota_exib["STATUS"] = frota_exib["STATUS"].replace({"ATIVO": "🟢 ATIVA", "INATIVO": "🔴 INATIVA"})
-        st.dataframe(frota_exib, use_container_width=True, hide_index=True)
+        st.info("Nenhum abastecimento encontrado para os filtros e a competência selecionada.")
 with tabs[5]:
     st.subheader("Gestão de Cadastros")
     if not is_admin:
@@ -2793,22 +3923,161 @@ with tabs[5]:
             "ATIVO": "🟢 ATIVO",
             "INATIVO": "🔴 INATIVO",
         })
-    st.markdown("##### 👥 Motoristas cadastrados")
-    colunas_cad = [c for c in [
-        "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO", "BASE_CADASTRO",
-        "EH_FOLGUISTA", "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
-    ] if c in cadastro_exib.columns]
-    cadastro_exib = cadastro_exib[colunas_cad]
-    st.dataframe(cadastro_exib, use_container_width=True, hide_index=True)
+    # ============================================================
+    # EDIÇÃO COMPLETA DO CADASTRO DO MOTORISTA
+    # ============================================================
+    st.markdown("#### ✏️ Editar cadastro completo do motorista")
+    st.caption("Altere nome, código funcional, categoria, filial, datas e status. A filial informada aqui é a fonte oficial do RH.")
+    cadastro_edit_lista = sorted(
+        cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist()
+    )
+    if cadastro_edit_lista:
+        motorista_editar = st.selectbox(
+            "Selecionar motorista para editar",
+            cadastro_edit_lista,
+            key="cadastro_motorista_editar",
+        )
+        motorista_editar_norm = DataUtils.normalizar_texto(motorista_editar)
+        # Chaves exclusivas por motorista fazem os campos do formulário
+        # reconstruírem com os valores do cadastro selecionado.
+        edit_key = re.sub(r"[^A-Z0-9_]+", "_", motorista_editar_norm) or "SEM_NOME"
+        linha_edit = cadastro[
+            cadastro["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto) == motorista_editar_norm
+        ]
+        linha_edit = linha_edit.iloc[0] if not linha_edit.empty else pd.Series(dtype=object)
 
-    frota_exib = frota.copy()
-    if "STATUS" in frota_exib.columns:
-        frota_exib["STATUS"] = frota_exib["STATUS"].replace({
-            "ATIVO": "🟢 ATIVA",
-            "INATIVO": "🔴 INATIVA",
-        })
-    st.markdown("##### 🚚 Placas cadastradas")
-    st.dataframe(frota_exib, use_container_width=True, hide_index=True)
+        codigos_edit = carregar_codigos_funcionais()
+        datas_edit = carregar_datas_motoristas()
+        inativos_edit = carregar_inativos()
+
+        nome_atual = str(linha_edit.get("MOTORISTA_CADASTRO", motorista_editar)).strip()
+        tipo_atual = str(linha_edit.get("TIPO_CADASTRO", "TRUCK")).strip() or "TRUCK"
+        base_atual = str(linha_edit.get("BASE_CADASTRO", "")).strip()
+        codigo_atual = str(codigos_edit.get(motorista_editar_norm, linha_edit.get("CODIGO_FUNCIONAL", "")) or "").strip()
+        data_contratacao_atual_edit = str(datas_edit.get(motorista_editar_norm, linha_edit.get("DATA_CONTRATACAO", "")) or "").strip()
+        data_inativacao_atual_edit = str(inativos_edit.get("MOTORISTA", {}).get(motorista_editar_norm, linha_edit.get("DATA_INATIVACAO", "")) or "").strip()
+        status_atual_edit = "INATIVO" if motorista_editar_norm in inativos_edit.get("MOTORISTA", {}) else "ATIVO"
+
+        e1,e2,e3 = st.columns(3)
+        with e1:
+            nome_novo_edit = st.text_input("👤 Nome do motorista", value=nome_atual, key=f"cad_edit_nome_{edit_key}")
+        with e2:
+            tipos_edicao = sorted(set(precos["TIPO"].dropna().astype(str).tolist() + ["FOLGUISTA"]))
+            tipo_novo_edit = st.selectbox("🏷️ Categoria padrão", tipos_edicao, index=(tipos_edicao.index(tipo_atual) if tipo_atual in tipos_edicao else 0), key=f"cad_edit_tipo_{edit_key}")
+        with e3:
+            base_opcoes_edicao = sorted(set(cadastro["BASE_CADASTRO"].dropna().astype(str).tolist()) | {base_atual})
+            base_opcoes_edicao = [x for x in base_opcoes_edicao if str(x).strip()]
+            if base_atual and base_atual not in base_opcoes_edicao:
+                base_opcoes_edicao.insert(0, base_atual)
+            base_nova_edit = st.selectbox("🏢 Filial / Base", base_opcoes_edicao, index=(base_opcoes_edicao.index(base_atual) if base_atual in base_opcoes_edicao else 0), key=f"cad_edit_base_{edit_key}") if base_opcoes_edicao else st.text_input("🏢 Filial / Base", value=base_atual, key=f"cad_edit_base_text_{edit_key}")
+
+        e4,e5,e6 = st.columns(3)
+        with e4:
+            codigo_novo_edit = st.text_input("🆔 Código funcional", value=codigo_atual, key=f"cad_edit_codigo_{edit_key}")
+        with e5:
+            data_contratacao_nova_edit = st.text_input("📅 Data de contratação", value=data_contratacao_atual_edit, placeholder="DD/MM/AAAA", key=f"cad_edit_data_contratacao_{edit_key}")
+        with e6:
+            data_inativacao_nova_edit = st.text_input("📅 Data de inativação", value=data_inativacao_atual_edit, placeholder="DD/MM/AAAA", key=f"cad_edit_data_inativacao_{edit_key}")
+
+        status_novo_edit = st.radio(
+            "🔘 Status do motorista",
+            ["ATIVO", "INATIVO"],
+            index=1 if status_atual_edit == "INATIVO" else 0,
+            horizontal=True,
+            key=f"cad_edit_status_{edit_key}",
+        )
+
+        if st.button("💾 Salvar cadastro completo", key="btn_salvar_cadastro_completo", disabled=(not is_admin), use_container_width=True):
+            nome_novo_norm = DataUtils.normalizar_texto(nome_novo_edit)
+            if not nome_novo_norm:
+                st.error("O nome do motorista é obrigatório.")
+            elif not str(base_nova_edit).strip():
+                st.error("A filial / base é obrigatória.")
+            elif status_novo_edit == "INATIVO" and not str(data_inativacao_nova_edit).strip():
+                st.error("Informe a data de inativação para um motorista inativo.")
+            else:
+                # Atualiza o cadastro persistente. Se o nome mudou, substitui a linha antiga.
+                df_mot = carregar_motoristas_customizados().copy()
+                if df_mot.empty:
+                    df_mot = pd.DataFrame(columns=["MOTORISTAS", "TIPO", "BASE"])
+                for c in ["MOTORISTAS", "TIPO", "BASE"]:
+                    if c not in df_mot.columns:
+                        df_mot[c] = ""
+                df_mot["MOTORISTAS"] = df_mot["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+                mask_old = df_mot["MOTORISTAS"] == motorista_editar_norm
+                novo_reg = pd.DataFrame([{"MOTORISTAS": nome_novo_norm, "TIPO": DataUtils.normalizar_texto(tipo_novo_edit), "BASE": DataUtils.normalizar_texto(base_nova_edit)}])
+                df_mot = df_mot.loc[~mask_old].copy()
+                # Evita duplicar o novo nome. O registro editado passa a ser a referência mais recente.
+                df_mot = df_mot[df_mot["MOTORISTAS"] != nome_novo_norm].copy()
+                df_mot = pd.concat([df_mot, novo_reg], ignore_index=True)
+                salvar_motoristas_customizados(df_mot)
+
+                # Migra/atualiza dados vinculados ao nome quando houver alteração.
+                novo_cad_key = nome_novo_norm
+                if nome_novo_key := novo_cad_key:
+                    # Código funcional
+                    cod_df = pd.DataFrame({"MOTORISTA": list(codigos_edit.keys()), "CODIGO_FUNCIONAL": list(codigos_edit.values())})
+                    if not cod_df.empty:
+                        cod_df["MOTORISTA"] = cod_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+                        cod_df = cod_df[cod_df["MOTORISTA"] != motorista_editar_norm]
+                    cod_df = pd.concat([cod_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "CODIGO_FUNCIONAL": str(codigo_novo_edit or '').strip()}])], ignore_index=True)
+                    cod_df.to_csv(ARQUIVO_CODIGOS_FUNCIONAIS, index=False, encoding="utf-8-sig")
+
+                    # Data de contratação
+                    dt_df = pd.DataFrame({"MOTORISTA": list(datas_edit.keys()), "DATA_CONTRATACAO": list(datas_edit.values())})
+                    if not dt_df.empty:
+                        dt_df["MOTORISTA"] = dt_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
+                        dt_df = dt_df[dt_df["MOTORISTA"] != motorista_editar_norm]
+                    dt_df = pd.concat([dt_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "DATA_CONTRATACAO": str(data_contratacao_nova_edit or '').strip()}])], ignore_index=True)
+                    dt_df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+
+                    # Status / data de inativação
+                    inat_df = pd.DataFrame(columns=["TIPO", "VALOR", "DATA_INATIVACAO"])
+                    if os.path.exists(ARQUIVO_INATIVOS):
+                        try:
+                            inat_df = pd.read_csv(ARQUIVO_INATIVOS, dtype=str, encoding="utf-8-sig")
+                        except Exception:
+                            pass
+                    for c in ["TIPO", "VALOR", "DATA_INATIVACAO"]:
+                        if c not in inat_df.columns:
+                            inat_df[c] = ""
+                    inat_df["VALOR"] = inat_df["VALOR"].apply(DataUtils.normalizar_texto)
+                    inat_df = inat_df[~((inat_df["TIPO"] == "MOTORISTA") & (inat_df["VALOR"].isin([motorista_editar_norm, nome_novo_norm])))]
+                    if status_novo_edit == "INATIVO":
+                        inat_df = pd.concat([inat_df, pd.DataFrame([{"TIPO": "MOTORISTA", "VALOR": nome_novo_norm, "DATA_INATIVACAO": str(data_inativacao_nova_edit or '').strip()}])], ignore_index=True)
+                    inat_df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+
+                st.cache_resource.clear()
+                st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
+                st.rerun()
+
+    # ============================================================
+    # VISUALIZAÇÃO DOS MOTORISTAS CADASTRADOS
+    # ============================================================
+    st.markdown("#### 👥 Motoristas cadastrados")
+    st.caption("Lista oficial de motoristas mantida na Gestão de Cadastros. Esta tabela é apenas para conferência e não é usada como fonte externa.")
+    cadastro_exib = cadastro.copy()
+    if not cadastro_exib.empty:
+        if "STATUS" in cadastro_exib.columns:
+            cadastro_exib["STATUS"] = cadastro_exib["STATUS"].replace({
+                "ATIVO": "🟢 ATIVO",
+                "INATIVO": "🔴 INATIVO",
+            })
+        colunas_cad = [c for c in [
+            "MOTORISTA_CADASTRO", "CODIGO_FUNCIONAL", "TIPO_CADASTRO",
+            "BASE_CADASTRO", "EH_FOLGUISTA", "DATA_CONTRATACAO",
+            "STATUS", "DATA_INATIVACAO"
+        ] if c in cadastro_exib.columns]
+        st.dataframe(cadastro_exib[colunas_cad], use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum motorista cadastrado.")
+
+    # A Gestão de Cadastros usa os dados internamente, mas as tabelas de cadastro
+    # não ocupam mais espaço visual nesta tela.
+    if is_admin:
+        cad_total = len(cadastro_all) if isinstance(cadastro_all, pd.DataFrame) else 0
+        cad_ativos = int((cadastro_all["STATUS"].fillna("ATIVO").astype(str).str.upper().eq("ATIVO")).sum()) if isinstance(cadastro_all, pd.DataFrame) and "STATUS" in cadastro_all.columns else cad_total
+        st.caption(f"Cadastro oficial: {cad_total} registros • {cad_ativos} ativos.")
 
 with tabs[3]:
     st.subheader("Média separada por placa")
@@ -2818,124 +4087,100 @@ with tabs[4]:
         st.subheader("Categoria considerada para pagamento")
         st.caption("Defina a categoria de pagamento por motorista + placa. Os registros abaixo podem ser editados ou excluídos individualmente.")
 
-        mot_opts=sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else []
+        # Restrição por filial: usuários de consulta só enxergam motoristas da filial autorizada.
+        if is_admin:
+            mot_opts=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
+            eventos_cat = eventos.copy()
+        else:
+            mot_opts=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).unique().tolist())
+            permitidos_norm={DataUtils.normalizar_texto(x) for x in mot_opts}
+            eventos_cat=eventos[eventos["CONDUTOR_NORMALIZADO"].isin(permitidos_norm)].copy()
         sm=st.selectbox("Motorista",mot_opts,key="cat_mot_new") if mot_opts else ""
-        plate_opts=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==sm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm else []
+        sm_norm=DataUtils.normalizar_texto(sm) if sm else ""
+        plate_opts=sorted(eventos_cat.loc[eventos_cat["CONDUTOR_NORMALIZADO"]==sm_norm,"PLACA_PADRONIZADA"].dropna().unique().tolist()) if sm_norm else []
         sp=st.selectbox("Placa",plate_opts,key="cat_plate_new") if plate_opts else ""
         sc=st.selectbox("Categoria",sorted(precos["TIPO"].unique()),key="cat_cat_new")
+        cv1,cv2=st.columns(2)
+        with cv1: cat_dt_ini=st.date_input("📅 Início da vigência",value=dt_ini,key="cat_vig_ini")
+        with cv2: cat_dt_fim=st.date_input("📅 Fim da vigência",value=dt_fim,key="cat_vig_fim")
+        st.caption("Por padrão, o mapeamento vale somente para a competência selecionada. Para mantê-lo em competências seguintes, defina uma data final posterior.")
         if st.button("💾 Salvar categoria",key="savecat", disabled=(not is_admin)) and sm and sp:
-            st.session_state.mapa_cat_custom[normalizar_chave_categoria_customizada(sm,sp)]=DataUtils.normalizar_texto(sc)
-            salvar_categorias_customizadas(st.session_state.mapa_cat_custom)
-            st.success("Categoria salva com sucesso.")
-            st.rerun()
+            if cat_dt_fim < cat_dt_ini: st.error("A data final não pode ser anterior à data inicial.")
+            else:
+                chave_nova=normalizar_chave_categoria_customizada(sm,sp); dfv=st.session_state.categorias_vigencia.copy(); dfv=dfv[dfv["MOTORISTA_CHAVE"].astype(str).str.upper()!=chave_nova].copy()
+                dfv=pd.concat([dfv,pd.DataFrame([{"MOTORISTA_CHAVE":chave_nova,"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(sc),"DATA_INICIO":cat_dt_ini.strftime("%d/%m/%Y"),"DATA_FIM":cat_dt_fim.strftime("%d/%m/%Y")}])],ignore_index=True)
+                st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Categoria salva com vigência definida."); st.rerun()
 
         mapa_atual = st.session_state.mapa_cat_custom or {}
-        if mapa_atual:
-            df_cat_custom = pd.DataFrame(
-                [
-                    {
-                        "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
-                        "PLACA": (str(chave).split("|||", 1)[1] if "|||" in str(chave) else ""),
-                        "CATEGORIA": str(valor),
-                        "_CHAVE": str(chave),
-                    }
-                    for chave, valor in mapa_atual.items()
-                ]
-            )
-
-            st.markdown("### 🛠️ Gerenciar categorias lançadas")
-            opcoes_cat = [
-                f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']}"
-                for i, row in df_cat_custom.reset_index(drop=True).iterrows()
-            ]
-            selecionado_cat = st.selectbox(
-                "Selecionar registro",
-                opcoes_cat,
-                key="cat_registro_sel",
-            )
-            idx_cat = int(selecionado_cat.split("]", 1)[0].replace("[", ""))
-            reg_cat = df_cat_custom.iloc[idx_cat]
-
-            ec1, ec2, ec3 = st.columns([2.2, 1.3, 1.5])
-            with ec1:
-                mot_edit = st.selectbox(
-                    "Motorista",
-                    mot_opts,
-                    index=(mot_opts.index(reg_cat["MOTORISTA"]) if reg_cat["MOTORISTA"] in mot_opts else 0),
-                    key="cat_mot_edit",
-                ) if mot_opts else ""
+        df_cat_custom = pd.DataFrame([
+            {
+                "MOTORISTA": (str(k).split("|||",1)[0] if "|||" in str(k) else str(k)),
+                "PLACA": (str(k).split("|||",1)[1] if "|||" in str(k) else ""),
+                "CATEGORIA": DataUtils.normalizar_texto(r.get("CATEGORIA_ESCOLHIDA","")),
+                "DATA_INICIO": str(r.get("DATA_INICIO","")),
+                "DATA_FIM": str(r.get("DATA_FIM","")),
+                "_CHAVE": str(k),
+            }
+            for _,r in st.session_state.categorias_vigencia.iterrows()
+            for k in [str(r.get("MOTORISTA_CHAVE","")).strip().upper()]
+            if k in mapa_atual
+        ])
+        if not df_cat_custom.empty:
+            st.markdown("### 🛠️ Gerenciar categorias da competência")
+            opcoes_cat=[f"[{i}] {row['MOTORISTA']} — {row['PLACA']} — {row['CATEGORIA']} — {row['DATA_INICIO']} a {row['DATA_FIM']}" for i,row in df_cat_custom.reset_index(drop=True).iterrows()]
+            selecionado_cat=st.selectbox("Selecionar registro",opcoes_cat,key="cat_registro_sel"); idx_cat=int(selecionado_cat.split("]",1)[0].replace("[","")); reg_cat=df_cat_custom.iloc[idx_cat]
+            ec1,ec2,ec3=st.columns([2.0,1.25,1.45])
+            with ec1: mot_edit=st.selectbox("Motorista",mot_opts,index=(mot_opts.index(reg_cat["MOTORISTA"]) if reg_cat["MOTORISTA"] in mot_opts else 0),key="cat_mot_edit") if mot_opts else ""
             with ec2:
-                placas_edit = sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"] == mot_edit, "PLACA_PADRONIZADA"].dropna().unique().tolist()) if mot_edit else []
-                if reg_cat["PLACA"] and reg_cat["PLACA"] not in placas_edit:
-                    placas_edit = [reg_cat["PLACA"]] + placas_edit
-                placa_edit = st.selectbox(
-                    "Placa",
-                    placas_edit,
-                    index=(placas_edit.index(reg_cat["PLACA"]) if reg_cat["PLACA"] in placas_edit else 0),
-                    key="cat_placa_edit",
-                ) if placas_edit else ""
+                placas_edit=sorted(eventos.loc[eventos["CONDUTOR_NORMALIZADO"]==DataUtils.normalizar_texto(mot_edit),"PLACA_PADRONIZADA"].dropna().unique().tolist()) if mot_edit else []
+                if reg_cat["PLACA"] and reg_cat["PLACA"] not in placas_edit: placas_edit=[reg_cat["PLACA"]]+placas_edit
+                placa_edit=st.selectbox("Placa",placas_edit,index=(placas_edit.index(reg_cat["PLACA"]) if reg_cat["PLACA"] in placas_edit else 0),key="cat_placa_edit") if placas_edit else ""
             with ec3:
-                categorias_edit = sorted(precos["TIPO"].unique().tolist())
-                categoria_edit = st.selectbox(
-                    "Categoria",
-                    categorias_edit,
-                    index=(categorias_edit.index(reg_cat["CATEGORIA"]) if reg_cat["CATEGORIA"] in categorias_edit else 0),
-                    key="cat_categoria_edit",
-                )
-
-            ac1, ac2 = st.columns(2)
+                categorias_edit=sorted(precos["TIPO"].unique().tolist()); categoria_edit=st.selectbox("Categoria",categorias_edit,index=(categorias_edit.index(reg_cat["CATEGORIA"]) if reg_cat["CATEGORIA"] in categorias_edit else 0),key="cat_categoria_edit")
+            ev1,ev2=st.columns(2)
+            with ev1: edit_dt_ini=st.date_input("📅 Início da vigência",value=parse_data_filtro(reg_cat["DATA_INICIO"]) or dt_ini,key="cat_edit_vig_ini")
+            with ev2: edit_dt_fim=st.date_input("📅 Fim da vigência",value=parse_data_filtro(reg_cat["DATA_FIM"]) or dt_fim,key="cat_edit_vig_fim")
+            ac1,ac2=st.columns(2)
             with ac1:
-                if st.button("✏️ Editar / Salvar alteração", key="cat_edit_btn", disabled=(not is_admin), use_container_width=True):
-                    chave_antiga = reg_cat["_CHAVE"]
-                    chave_nova = normalizar_chave_categoria_customizada(mot_edit, placa_edit)
-                    novo_mapa = dict(st.session_state.mapa_cat_custom)
-                    if chave_antiga != chave_nova:
-                        novo_mapa.pop(chave_antiga, None)
-                    novo_mapa[chave_nova] = DataUtils.normalizar_texto(categoria_edit)
-                    st.session_state.mapa_cat_custom = novo_mapa
-                    salvar_categorias_customizadas(novo_mapa)
-                    st.success("Mapeamento atualizado com sucesso.")
-                    st.rerun()
+                if st.button("✏️ Editar / Salvar alteração",key="cat_edit_btn",disabled=(not is_admin),use_container_width=True):
+                    if edit_dt_fim<edit_dt_ini: st.error("A data final não pode ser anterior à inicial.")
+                    else:
+                        chave_antiga=reg_cat["_CHAVE"]; chave_nova=normalizar_chave_categoria_customizada(mot_edit,placa_edit); dfv=st.session_state.categorias_vigencia.copy(); dfv=dfv[~dfv["MOTORISTA_CHAVE"].astype(str).str.upper().isin({str(chave_antiga).upper(),str(chave_nova).upper()})].copy(); dfv=pd.concat([dfv,pd.DataFrame([{"MOTORISTA_CHAVE":chave_nova,"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(categoria_edit),"DATA_INICIO":edit_dt_ini.strftime("%d/%m/%Y"),"DATA_FIM":edit_dt_fim.strftime("%d/%m/%Y")}])],ignore_index=True); st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Mapeamento atualizado com sucesso."); st.rerun()
             with ac2:
-                if st.button("🗑️ Excluir registro", key="cat_delete_btn", disabled=(not is_admin), use_container_width=True):
-                    chave_excluir = reg_cat["_CHAVE"]
-                    novo_mapa = {k: v for k, v in st.session_state.mapa_cat_custom.items() if k != chave_excluir}
-                    st.session_state.mapa_cat_custom = novo_mapa
-                    salvar_categorias_customizadas(novo_mapa)
-                    st.success("Mapeamento excluído com sucesso.")
-                    st.rerun()
-
-            st.dataframe(
-                df_cat_custom.drop(columns=["_CHAVE"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
+                if st.button("🗑️ Excluir registro",key="cat_delete_btn",disabled=(not is_admin),use_container_width=True):
+                    chave_excluir=str(reg_cat["_CHAVE"]).upper(); dfv=st.session_state.categorias_vigencia[st.session_state.categorias_vigencia["MOTORISTA_CHAVE"].astype(str).str.upper()!=chave_excluir].copy(); st.session_state.categorias_vigencia=dfv; st.session_state.mapa_cat_custom=categorias_ativas_na_competencia(dfv,dt_ini,dt_fim); salvar_categorias_vigencia(dfv); st.success("Mapeamento excluído com sucesso."); st.rerun()
+            st.dataframe(df_cat_custom.drop(columns=["_CHAVE"]),use_container_width=True,hide_index=True)
+        else: st.info("Nenhum mapeamento manual de categoria com vigência ativa nesta competência.")
     else:
         st.subheader("Categoria por Placa — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Edição e exclusão de categorias são exclusivas do Administrador.")
-        mapa_atual = st.session_state.mapa_cat_custom or {}
+        mapa_atual=st.session_state.mapa_cat_custom or {}
         if mapa_atual:
-            df_cat_view = pd.DataFrame([
-                {
-                    "MOTORISTA": (str(chave).split("|||", 1)[0] if "|||" in str(chave) else str(chave)),
-                    "PLACA": (str(chave).split("|||", 1)[1] if "|||" in str(chave) else ""),
-                    "CATEGORIA": str(valor),
-                }
-                for chave, valor in mapa_atual.items()
-            ])
-            st.dataframe(df_cat_view, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum mapeamento manual de categoria foi lançado ainda.")
+            permitidos_norm={DataUtils.normalizar_texto(x) for x in cadastro["MOTORISTA_CADASTRO"].dropna().astype(str)}
+            df_cat_view=pd.DataFrame([{"MOTORISTA":(k.split("|||",1)[0] if "|||" in k else k),"PLACA":(k.split("|||",1)[1] if "|||" in k else ""),"CATEGORIA":DataUtils.normalizar_texto(r.get("CATEGORIA_ESCOLHIDA","")),"DATA_INICIO":str(r.get("DATA_INICIO","")),"DATA_FIM":str(r.get("DATA_FIM",""))} for _,r in st.session_state.categorias_vigencia.iterrows() for k in [str(r.get("MOTORISTA_CHAVE","")).strip().upper()] if k in mapa_atual and DataUtils.normalizar_texto((k.split("|||",1)[0] if "|||" in k else k)) in permitidos_norm])
+            if df_cat_view.empty: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
+            else: st.dataframe(df_cat_view,use_container_width=True,hide_index=True)
+        else: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
 with tabs[11]:
     st.subheader("Relatório RH")
-    st.caption("Relatório de pagamento: considera o prêmio final apurado para cada motorista na competência selecionada, após todas as regras e descontos. Não é um demonstrativo de abastecimentos.")
-    st.caption("Valores zerados são destacados em vermelho.")
+    st.caption("Relação de todos os motoristas ATIVOS no cadastro oficial. Férias, atestados ou ausência de abastecimento não retiram o motorista do RH; nesses casos o valor fica R$ 0,00.")
+    st.caption(f"Motoristas ativos no cadastro: {len(rh_view)}")
     st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
 with tabs[2]:
     st.subheader("Detalhamento dos Abastecimentos")
-    st.dataframe(det_view,use_container_width=True,hide_index=True)
+    st.caption("O motorista considerado no cálculo é conciliado pelo ciclo entre abastecimentos: KM anterior → viagens realizadas → KM do abastecimento atual. Se o ciclo envolver mais de um motorista, fica pendente para validação.")
+    cols_auditoria = [
+        "DATA_FILTRO", "MOTORISTA_ABASTECIMENTO_ORIGINAL", "MOTORISTA_VIAGEM",
+        "MOTORISTA_CONSIDERADO", "STATUS_VALIDACAO_VIAGEM", "KM_ABASTECIMENTO_ANTERIOR",
+        "VIAGENS_CICLO_QTD", "VIAGENS_CICLO_MOTORISTAS", "PLACA_PADRONIZADA",
+        "TIPO", "KM_ATUAL_NUM", "QTDE_NUM", "VALOR_NUM",
+        "VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO",
+    ]
+    cols_auditoria = [c for c in cols_auditoria if c in det_view.columns]
+    if cols_auditoria:
+        st.dataframe(det_view[cols_auditoria],use_container_width=True,hide_index=True)
+    else:
+        st.dataframe(det_view,use_container_width=True,hide_index=True)
 with tabs[6]:
     st.subheader("Recibo de Premiação")
     rec_fil=st.selectbox("Filial",filiais_lista,key="rf")
@@ -2943,8 +4188,17 @@ with tabs[6]:
     rec_mot=st.selectbox("Motorista",rec_mots,key="rm")
     rec_fac=st.text_input("Fator Carga",value="50%")
     if st.button("📄 Gerar recibo",key="rr"):
-        html=gerar_recibos_lote(rec_fil,rec_mot,dt_ini.strftime('%d/%m/%Y'),dt_fim.strftime('%d/%m/%Y'),rec_fac,res_f)
-        st.components.v1.html(html,height=900,scrolling=True)
+        st.session_state["recibos_html_gerados"] = gerar_recibos_lote(
+            rec_fil,
+            rec_mot,
+            dt_ini.strftime('%d/%m/%Y'),
+            dt_fim.strftime('%d/%m/%Y'),
+            rec_fac,
+            res_f,
+        )
+    if st.session_state.get("recibos_html_gerados"):
+        recibos_render = str(st.session_state["recibos_html_gerados"])
+        st.components.v1.html(recibos_render, height=980, scrolling=True)
 with tabs[7]:
     if is_admin:
         st.subheader("Lançamento de Ausências")
@@ -2957,33 +4211,192 @@ with tabs[7]:
                 if ad<=0: st.error("Data final inválida")
                 else:
                     novo=pd.DataFrame([{"MOTORISTA":am,"TIPO_AUSENCIA":at,"DATA_INICIO":ai.strftime('%d/%m/%Y'),"DATA_FIM":af.strftime('%d/%m/%Y'),"DIAS":ad,"OBSERVACAO":ao}]); st.session_state.ausencias=pd.concat([st.session_state.ausencias,novo],ignore_index=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
-        st.dataframe(_motoristas_filial(st.session_state.ausencias),use_container_width=True,hide_index=True)
-        if not st.session_state.ausencias.empty:
-            opts=[ausencia_label(i,r) for i,r in st.session_state.ausencias.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
+        aus_comp = _motoristas_filial(filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim))
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.drop(columns=["_INDICE_ORIGINAL"], errors="ignore").copy()
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"], errors="ignore")
+            st.dataframe(aus_exib,use_container_width=True,hide_index=True)
+        else:
+            st.info("Nenhuma ausência incide nesta competência.")
+        if not aus_comp.empty:
+            opts=[ausencia_label(int(r.get("_INDICE_ORIGINAL",i)),r) for i,r in aus_comp.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="ax");
             if st.button("🗑️ Excluir registro selecionado",key="axx", disabled=(not is_admin)):
                 idx=int(sel.split(']')[0].replace('[','')); st.session_state.ausencias=st.session_state.ausencias.drop(index=idx).reset_index(drop=True); salvar_ausencias(st.session_state.ausencias); st.rerun()
     else:
         st.subheader("Ausências — somente consulta")
         st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de ausências são exclusivos do Administrador.")
-        st.dataframe(_motoristas_filial(st.session_state.ausencias), use_container_width=True, hide_index=True)
+        aus_comp = _motoristas_filial(filtrar_ausencias_competencia(st.session_state.ausencias, dt_ini, dt_fim))
+        if not aus_comp.empty and "DIAS_COMPETENCIA" in aus_comp.columns:
+            aus_exib = aus_comp.drop(columns=["_INDICE_ORIGINAL"], errors="ignore").copy()
+            aus_exib["DIAS"] = aus_exib["DIAS_COMPETENCIA"]
+            aus_exib = aus_exib.drop(columns=["DIAS_COMPETENCIA"], errors="ignore")
+            st.dataframe(aus_exib,use_container_width=True,hide_index=True)
+        else:
+            st.info("Nenhuma ausência incide nesta competência.")
 with tabs[10]:
+    # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
+    df_descl_comp = filtrar_desclassificacoes_competencia(
+        st.session_state.desclassificacoes, dt_ini, dt_fim
+    )
+    df_descl_comp = _motoristas_filial(df_descl_comp)
+
     if is_admin:
         st.subheader("Gestão de Desclassificações (Pilar 1)")
+        st.info("Cada lançamento pertence somente à competência da DATA DO EVENTO. Ao mudar de competência, os eventos do mês anterior deixam de afetar o prêmio.")
         d_mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
         if d_mots:
-            dm=st.selectbox("Motorista",d_mots,key="dm"); dc=st.selectbox("Critério / Infração",CRITERIOS_PILAR_1,key="dc"); dp=st.number_input("Pontos / Eventos",min_value=1,value=1); do=st.text_input("Observação",key="do")
+            dm=st.selectbox("Motorista",d_mots,key="dm")
+            dc=st.selectbox("Critério / Infração",CRITERIOS_PILAR_1,key="dc")
+            dp=st.number_input("Pontos / Eventos",min_value=1,value=1,key="dp")
+            dd=st.date_input("Data do evento",value=dt_fim,key="dd")
+            do=st.text_input("Observação",key="do")
             if st.button("➕ Lançar",key="dadd", disabled=(not is_admin)):
-                num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1; ti="DESCLASSIFICADO" if num>=5 else "PONTOS"; novo=pd.DataFrame([{"MOTORISTA":dm,"CRITERIO":dc,"PONTOS":dp,"TIPO_IMPACTO":ti,"OBSERVACAO":do}]); st.session_state.desclassificacoes=pd.concat([st.session_state.desclassificacoes,novo],ignore_index=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
-        st.dataframe(_motoristas_filial(st.session_state.desclassificacoes),use_container_width=True,hide_index=True)
-        if not st.session_state.desclassificacoes.empty:
-            opts=[descl_label(i,r) for i,r in st.session_state.desclassificacoes.reset_index(drop=True).iterrows()]; sel=st.selectbox("🗑️ Registro para excluir",opts,key="dx");
+                num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1
+                ti="DESCLASSIFICADO" if num>=5 else "PONTOS"
+                novo=pd.DataFrame([{
+                    "MOTORISTA":dm,
+                    "CRITERIO":dc,
+                    "PONTOS":dp,
+                    "TIPO_IMPACTO":ti,
+                    "DATA_EVENTO":dd.strftime('%d/%m/%Y'),
+                    "OBSERVACAO":do,
+                }])
+                st.session_state.desclassificacoes=pd.concat([st.session_state.desclassificacoes,novo],ignore_index=True)
+                salvar_desclassificacoes(st.session_state.desclassificacoes)
+                st.rerun()
+
+        if not df_descl_comp.empty:
+            exib=df_descl_comp.copy()
+            st.dataframe(exib,use_container_width=True,hide_index=True)
+            base_idx=exib.copy()
+            base_idx["_ORIG_INDEX"]=base_idx.index
+            opts=[]
+            for _,r in base_idx.iterrows():
+                opts.append(f"[{int(r['_ORIG_INDEX'])}] {r.get('MOTORISTA','')} — {str(r.get('CRITERIO','')).split('[',1)[0].strip()} — {r.get('DATA_EVENTO','')}")
+            sel=st.selectbox("🗑️ Registro para excluir",opts,key="dx")
             if st.button("🗑️ Excluir registro selecionado",key="dxx", disabled=(not is_admin)):
-                idx=int(sel.split(']')[0].replace('[','')); st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True); salvar_desclassificacoes(st.session_state.desclassificacoes); st.rerun()
+                idx=int(sel.split(']')[0].replace('[',''))
+                st.session_state.desclassificacoes=st.session_state.desclassificacoes.drop(index=idx).reset_index(drop=True)
+                salvar_desclassificacoes(st.session_state.desclassificacoes)
+                st.rerun()
+        else:
+            st.info("Nenhuma desclassificação lançada na competência selecionada.")
+
+        # ------------------------------------------------------------
+        # MIGRAÇÃO DOS LANÇAMENTOS ANTIGOS
+        # ------------------------------------------------------------
+        # Lançamentos antigos não possuem DATA_EVENTO. Para evitar que
+        # o usuário precise apagar e relançar cada item, o administrador
+        # pode atribuir uma única data de enquadramento a um ou vários
+        # registros. A data escolhida só define a competência 26->25;
+        # não altera motorista, critério ou pontos do lançamento.
+        sem_data_full = (
+            st.session_state.desclassificacoes[
+                st.session_state.desclassificacoes.get(
+                    "DATA_EVENTO",
+                    pd.Series(index=st.session_state.desclassificacoes.index, dtype=str),
+                )
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq("")
+            ]
+            if not st.session_state.desclassificacoes.empty
+            else pd.DataFrame()
+        )
+        sem_data = _motoristas_filial(sem_data_full)
+        if not sem_data.empty:
+            st.warning(
+                "Existem lançamentos antigos sem DATA_EVENTO. Eles não afetam nenhuma competência até serem regularizados abaixo."
+            )
+
+            # Competências disponíveis para enquadramento.
+            competencia_base = pd.Timestamp(dt_ini).normalize()
+            competencias = []
+            for k in range(-2, 13):
+                inicio_c = competencia_base + pd.DateOffset(months=k)
+                fim_c = inicio_c + pd.DateOffset(months=1) - pd.Timedelta(days=1)
+                label_c = f"{inicio_c.strftime('%d/%m/%Y')} → {fim_c.strftime('%d/%m/%Y')}"
+                competencias.append((label_c, inicio_c.date(), fim_c.date()))
+
+            st.markdown("#### 🛠️ Regularizar lançamentos antigos")
+            st.caption(
+                "Selecione os registros antigos e informe a competência em que eles realmente ocorreram. "
+                "A aplicação preencherá a DATA_EVENTO sem alterar os demais dados."
+            )
+
+            legado_df = sem_data.copy()
+            legado_df["_IDX_ORIGINAL"] = legado_df.index
+            opcoes_legado = []
+            for _, r in legado_df.iterrows():
+                idx_leg = int(r["_IDX_ORIGINAL"])
+                opcoes_legado.append(
+                    f"[{idx_leg}] {r.get('MOTORISTA','')} — "
+                    f"{str(r.get('CRITERIO','')).split('[',1)[0].strip()} — "
+                    f"{r.get('PONTOS',1)} ponto(s)"
+                )
+
+            selecionados_legado = st.multiselect(
+                "📋 Registros antigos para regularizar",
+                opcoes_legado,
+                default=opcoes_legado,
+                key="legado_sel_descl",
+            )
+
+            labels_comp = [x[0] for x in competencias]
+            comp_label = st.selectbox(
+                "📅 Competência de destino",
+                labels_comp,
+                index=min(2, len(labels_comp)-1),
+                key="legado_comp_descl",
+            )
+            comp_ini, comp_fim = next((a,b) for label,a,b in competencias if label == comp_label)
+            data_enq = st.date_input(
+                "📌 Data de enquadramento",
+                value=comp_ini,
+                min_value=comp_ini,
+                max_value=comp_fim,
+                key="legado_data_descl",
+                help="Pode ser qualquer data dentro da competência escolhida. Ela serve para enquadrar o lançamento no período 26→25."
+            )
+
+            c_mig1, c_mig2 = st.columns([1, 1])
+            with c_mig1:
+                st.metric("Registros antigos", len(opcoes_legado))
+            with c_mig2:
+                st.metric("Selecionados", len(selecionados_legado))
+
+            if st.button(
+                "✅ Aplicar competência aos registros selecionados",
+                key="migrar_legado_descl",
+                use_container_width=True,
+                disabled=(not is_admin or not selecionados_legado),
+            ):
+                indices_escolhidos = []
+                for texto in selecionados_legado:
+                    try:
+                        indices_escolhidos.append(int(texto.split("]",1)[0].replace("[","")))
+                    except Exception:
+                        pass
+
+                df_atual = st.session_state.desclassificacoes.copy()
+                data_str = data_enq.strftime('%d/%m/%Y')
+                for idx_leg in indices_escolhidos:
+                    if idx_leg in df_atual.index:
+                        df_atual.at[idx_leg, "DATA_EVENTO"] = data_str
+
+                st.session_state.desclassificacoes = df_atual
+                salvar_desclassificacoes(df_atual)
+                st.success(
+                    f"{len(indices_escolhidos)} lançamento(s) regularizado(s) na competência {comp_label}."
+                )
+                st.rerun()
 
     else:
         st.subheader("Desclassificações — somente consulta")
-        st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de desclassificações são exclusivos do Administrador.")
-        st.dataframe(_motoristas_filial(st.session_state.desclassificacoes), use_container_width=True, hide_index=True)
+        st.info("Os eventos exibidos e considerados pertencem somente à competência selecionada. Eventos de meses anteriores não permanecem ativos.")
+        st.dataframe(df_descl_comp, use_container_width=True, hide_index=True)
 if is_admin:
     with tabs[12]:
         st.subheader("🔐 Gestão de Usuários")
@@ -3043,11 +4456,34 @@ if is_admin:
                     st.success("Usuário atualizado.")
                     st.rerun()
 
-def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False):
+def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False, df_automatico=None):
     with tab:
         st.subheader(titulo)
         if not is_admin:
             st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de eventos são exclusivos do Administrador.")
+            if is_excesso and df_automatico is not None and not df_automatico.empty:
+                ex_auto = df_automatico.copy()
+                # O extrato oficial traz motorista/filial/eventos, mas pode não trazer categoria.
+                # Busca a categoria no resultado consolidado do motorista.
+                if "CATEGORIA" not in ex_auto.columns:
+                    ex_auto["CATEGORIA"] = ""
+                mapa_cat_ex = {}
+                if "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
+                    mapa_cat_ex = {
+                        DataUtils.normalizar_texto(r["MOTORISTA"]): DataUtils.normalizar_texto(r["CATEGORIA"])
+                        for _, r in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows()
+                        if DataUtils.normalizar_texto(r["CATEGORIA"])
+                    }
+                ex_auto["CATEGORIA"] = ex_auto.apply(
+                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
+                    axis=1,
+                )
+                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].apply(valor_ponto_categoria)
+                ex_auto["DESCONTO"] = pd.to_numeric(ex_auto["EVENTOS"], errors="coerce").fillna(0) * ex_auto["VALOR/EVENTO"]
+                for _c in ["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]:
+                    if _c not in ex_auto.columns: ex_auto[_c] = ""
+                st.dataframe(ex_auto[["MOTORISTA","FILIAL","EVENTOS","VALOR/EVENTO","DESCONTO","ARQUIVO_FONTE"]], use_container_width=True, hide_index=True)
+                return
             df_at = st.session_state[df_key].copy()
             if df_at.empty:
                 st.info("Nenhum lançamento registrado.")
@@ -3059,6 +4495,35 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
             return
         else:
             st.info(info)
+            if is_excesso and df_automatico is not None and not df_automatico.empty:
+                st.success(f"✅ Extrato automático carregado: {len(df_automatico)} motoristas com eventos na competência {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}.")
+                ex_auto = df_automatico.copy()
+                mapa_cat_ex = {}
+                if not res_f.empty and "MOTORISTA" in res_f.columns and "CATEGORIA" in res_f.columns:
+                    for _, rr in res_f[["MOTORISTA", "CATEGORIA"]].dropna(subset=["MOTORISTA"]).iterrows():
+                        chave = DataUtils.normalizar_texto(rr["MOTORISTA"])
+                        catv = DataUtils.normalizar_texto(rr["CATEGORIA"])
+                        if chave and catv:
+                            mapa_cat_ex[chave] = catv
+                ex_auto["CATEGORIA"] = ex_auto.get("CATEGORIA", "")
+                ex_auto["CATEGORIA"] = ex_auto.apply(
+                    lambda r: DataUtils.normalizar_texto(r.get("CATEGORIA", "")) or mapa_cat_ex.get(DataUtils.normalizar_texto(r.get("MOTORISTA", "")), ""),
+                    axis=1,
+                )
+                ex_auto["VALOR/EVENTO"] = ex_auto["CATEGORIA"].map(valor_ponto_categoria).fillna(0.0)
+                ex_auto["DESCONTO"] = ex_auto["EVENTOS"] * ex_auto["VALOR/EVENTO"]
+                ex_auto["VALOR/EVENTO"] = ex_auto["VALOR/EVENTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+                ex_auto["DESCONTO"] = ex_auto["DESCONTO"].map(lambda x:f"R$ {x:,.2f}".replace(",","X").replace(".",",").replace("X","."))
+                # Algumas versões do extrato/arquivo podem não trazer todos os
+                # campos auxiliares. Exibe somente as colunas existentes,
+                # evitando KeyError e mantendo a importação automática.
+                colunas_auto = ["MOTORISTA", "FILIAL", "EVENTOS", "VALOR/EVENTO", "DESCONTO", "ARQUIVO_FONTE"]
+                for _c in colunas_auto:
+                    if _c not in ex_auto.columns:
+                        ex_auto[_c] = ""
+                st.dataframe(ex_auto[colunas_auto], use_container_width=True, hide_index=True)
+                st.caption("Os eventos acima são usados automaticamente no cálculo do prêmio. O lançamento manual fica disponível apenas como fallback quando não houver extrato para a competência.")
+                return
             st.caption("TRUCK R$ 1,40 | BITRUCK R$ 1,63 | CARRETA R$ 1,87 | BITREM R$ 2,10 | RODOTREM/RODOENTREGA R$ 2,45")
             mots=sorted(cadastro["MOTORISTA_CADASTRO"].dropna().unique().tolist())
             if mots:
@@ -3098,7 +4563,8 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
 _render_eventos_pilar(
     tabs[8], "🚨 Excesso de Velocidade",
     "Até 30 eventos: desconto por evento. Mais de 30 eventos no período: perda integral do prêmio.",
-    "excesso", "excesso_velocidade", salvar_excesso_velocidade, True
+    "excesso", "excesso_velocidade", salvar_excesso_velocidade, True,
+    df_automatico=carregar_excesso_velocidade_automatico(dt_ini, dt_fim)
 )
 _render_eventos_pilar(
     tabs[9], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
