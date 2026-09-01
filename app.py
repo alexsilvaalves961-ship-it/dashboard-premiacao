@@ -571,26 +571,35 @@ def salvar_frota_customizada(df: pd.DataFrame):
 
 
 def carregar_motoristas_customizados() -> pd.DataFrame:
+  """Carrega o cadastro oficial e preserva campos administrativos extras."""
+  colunas = [
+      "MOTORISTAS", "TIPO", "BASE", "CODIGO_FUNCIONAL",
+      "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
+  ]
   if os.path.exists(ARQUIVO_MOTORISTAS_CUSTOM):
     try:
-      df = pd.read_csv(
-          ARQUIVO_MOTORISTAS_CUSTOM, dtype=str, encoding="utf-8-sig"
-      )
-      if (
-          "MOTORISTAS" in df.columns
-          and "TIPO" in df.columns
-          and "BASE" in df.columns
-      ):
+      df = pd.read_csv(ARQUIVO_MOTORISTAS_CUSTOM, dtype=str, encoding="utf-8-sig").fillna("")
+      if all(c in df.columns for c in ["MOTORISTAS", "TIPO", "BASE"]):
+        for c in colunas:
+          if c not in df.columns:
+            df[c] = ""
         return df
     except Exception as e:
       print(f"Erro ao carregar motoristas customizados: {e}")
-  return pd.DataFrame(columns=["MOTORISTAS", "TIPO", "BASE"])
+  return pd.DataFrame(columns=colunas)
 
 
 def salvar_motoristas_customizados(df: pd.DataFrame):
   try:
     garantir_diretorio()
-    df.to_csv(ARQUIVO_MOTORISTAS_CUSTOM, index=False, encoding="utf-8-sig")
+    out = df.copy() if df is not None else pd.DataFrame()
+    for c in [
+        "MOTORISTAS", "TIPO", "BASE", "CODIGO_FUNCIONAL",
+        "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"
+    ]:
+      if c not in out.columns:
+        out[c] = ""
+    out.to_csv(ARQUIVO_MOTORISTAS_CUSTOM, index=False, encoding="utf-8-sig")
   except Exception as e:
     print(f"Erro ao salvar motoristas customizados: {e}")
 
@@ -620,63 +629,81 @@ def _chave_migracao_motorista(nome: str) -> str:
 
 
 def migrar_cadastro_legado_uma_vez() -> int:
-    """Povoa o cadastro persistente com o snapshot legado e os cadastros atuais.
+  """Completa o cadastro oficial sem apagar nome, código, datas ou status existentes."""
+  try:
+    atual = carregar_motoristas_customizados().copy().fillna("")
+    for c in ["MOTORISTAS", "TIPO", "BASE", "CODIGO_FUNCIONAL", "DATA_CONTRATACAO", "STATUS", "DATA_INATIVACAO"]:
+      if c not in atual.columns:
+        atual[c] = ""
+    atual["MOTORISTAS"] = atual["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+    atual["TIPO"] = atual["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
+    atual["BASE"] = atual["BASE"].apply(DataUtils.normalizar_texto)
+    atual = atual[atual["MOTORISTAS"] != ""].copy()
 
-    Não lê Pasta4.xlsx. O snapshot está incorporado no código exclusivamente para
-    permitir a transição única. Os dados já existentes na Gestão de Cadastros têm
-    prioridade sobre nome/categoria/filial do legado.
-    """
-    try:
-        atual = carregar_motoristas_customizados().copy()
-        for c in ["MOTORISTAS", "TIPO", "BASE"]:
-            if c not in atual.columns:
-                atual[c] = ""
-        atual = atual[["MOTORISTAS", "TIPO", "BASE"]].copy()
-        atual["MOTORISTAS"] = atual["MOTORISTAS"].apply(DataUtils.normalizar_texto)
-        atual["TIPO"] = atual["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
-        atual["BASE"] = atual["BASE"].apply(DataUtils.normalizar_texto)
-        atual = atual[atual["MOTORISTAS"] != ""].copy()
+    # Se já existe um cadastro persistente com os registros atuais, ele é a fonte oficial.
+    # O snapshot legado só complementa pessoas ausentes; jamais sobrescreve os atuais.
+    if not atual.empty:
+      chaves_atuais = set(atual["MOTORISTAS"].map(_chave_migracao_motorista))
+    else:
+      chaves_atuais = set()
 
-        # Snapshot legado; não depende do arquivo Pasta4.
-        legado = pd.DataFrame(LEGACY_CADASTRO_SNAPSHOT, columns=["MOTORISTAS", "TIPO", "BASE"])
-        legado["MOTORISTAS"] = legado["MOTORISTAS"].apply(DataUtils.normalizar_texto)
-        legado["TIPO"] = legado["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
-        legado["BASE"] = legado["BASE"].apply(DataUtils.normalizar_texto)
+    legado = pd.DataFrame(LEGACY_CADASTRO_SNAPSHOT, columns=["MOTORISTAS", "TIPO", "BASE"])
+    legado["MOTORISTAS"] = legado["MOTORISTAS"].apply(DataUtils.normalizar_texto)
+    legado["TIPO"] = legado["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"})
+    legado["BASE"] = legado["BASE"].apply(DataUtils.normalizar_texto)
 
-        # Cadastro legado primeiro.
-        mesclado = {}
-        for _, r in legado.iterrows():
-            chave = _chave_migracao_motorista(r["MOTORISTAS"])
-            if chave:
-                mesclado[chave] = {
-                    "MOTORISTAS": r["MOTORISTAS"],
-                    "TIPO": r["TIPO"],
-                    "BASE": r["BASE"],
-                }
+    # Complementos administrativos que já existam nos arquivos auxiliares.
+    codigos = carregar_codigos_funcionais()
+    datas = carregar_datas_motoristas()
+    inativos = carregar_inativos().get("MOTORISTA", {})
 
-        # Cadastro atual tem prioridade e também pode corrigir o nome do legado.
-        for _, r in atual.iterrows():
-            chave = _chave_migracao_motorista(r["MOTORISTAS"])
-            if chave:
-                mesclado[chave] = {
-                    "MOTORISTAS": r["MOTORISTAS"],
-                    "TIPO": r["TIPO"],
-                    "BASE": r["BASE"],
-                }
+    registros = {}
+    for _, r in legado.iterrows():
+      chave = _chave_migracao_motorista(r["MOTORISTAS"])
+      if chave:
+        registros[chave] = {
+          "MOTORISTAS": r["MOTORISTAS"], "TIPO": r["TIPO"], "BASE": r["BASE"],
+          "CODIGO_FUNCIONAL": str(codigos.get(chave, "") or "").strip(),
+          "DATA_CONTRATACAO": str(datas.get(chave, "") or "").strip(),
+          "STATUS": "INATIVO" if chave in inativos else "",
+          "DATA_INATIVACAO": str(inativos.get(chave, "") or "").strip(),
+        }
 
-        final = pd.DataFrame(list(mesclado.values()), columns=["MOTORISTAS","TIPO","BASE"])
-        final = final.sort_values("MOTORISTAS", kind="stable").reset_index(drop=True)
+    for _, r in atual.iterrows():
+      chave = _chave_migracao_motorista(r["MOTORISTAS"])
+      if not chave:
+        continue
+      base = registros.get(chave, {c: "" for c in ["MOTORISTAS","TIPO","BASE","CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"]})
+      # Atual sempre vence o legado, inclusive nome corrigido.
+      base["MOTORISTAS"] = str(r.get("MOTORISTAS", "") or base["MOTORISTAS"]).strip()
+      base["TIPO"] = str(r.get("TIPO", "") or base["TIPO"]).strip()
+      base["BASE"] = str(r.get("BASE", "") or base["BASE"]).strip()
+      for c in ["CODIGO_FUNCIONAL","DATA_CONTRATACAO","DATA_INATIVACAO"]:
+        val = str(r.get(c, "") or "").strip()
+        if val:
+          base[c] = val
+      if str(r.get("STATUS", "") or "").strip():
+        base["STATUS"] = str(r.get("STATUS")).strip().upper()
+      registros[chave] = base
 
-        antes = len(atual)
-        # Faz a migração quando ainda não há o conjunto completo do cadastro persistente.
-        # Depois que chegar ao conjunto consolidado, reexecutar é idempotente.
-        if len(final) > antes or antes < len(LEGACY_CADASTRO_SNAPSHOT):
-            salvar_motoristas_customizados(final)
-            return len(final)
-        return antes
-    except Exception as e:
-        print(f"Erro na migração inicial do cadastro: {e}")
-        return len(carregar_motoristas_customizados())
+    final = pd.DataFrame(list(registros.values()))
+    if final.empty:
+      final = atual.copy()
+    for c in ["MOTORISTAS","TIPO","BASE","CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"]:
+      if c not in final.columns:
+        final[c] = ""
+    final = final[["MOTORISTAS","TIPO","BASE","CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"]]
+    final = final[final["MOTORISTAS"].astype(str).str.strip() != ""].drop_duplicates("MOTORISTAS", keep="last")
+    final = final.sort_values("MOTORISTAS", kind="stable").reset_index(drop=True)
+
+    # Grava apenas se o conjunto/número de colunas realmente mudou.
+    deve_gravar = (set(final["MOTORISTAS"].map(_chave_migracao_motorista)) != chaves_atuais) or any(c not in atual.columns for c in ["CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"])
+    if deve_gravar or atual.empty:
+      salvar_motoristas_customizados(final)
+    return len(final)
+  except Exception as e:
+    print(f"Erro na migração inicial do cadastro: {e}")
+    return len(carregar_motoristas_customizados())
 
 
 def _carregar_eventos_pilar(caminho: str) -> pd.DataFrame:
@@ -1409,65 +1436,46 @@ class DataLoader:
     return resultado, mapa
 
   def carregar_cadastro_motoristas(self) -> pd.DataFrame:
-    """
-    Cadastro oficial dos motoristas: a fonte única é a Gestão de Cadastros.
-
-    A partir desta versão, o antigo arquivo-base de motoristas não participa mais
-    do carregamento, cálculo, filtros ou relatório RH. O cadastro persistente é o arquivo
-    interno ARQUIVO_MOTORISTAS_CUSTOM, alimentado pela tela Gestão de Cadastros.
-    """
-    df_custom = carregar_motoristas_customizados().copy()
-
+    """Fonte oficial: Gestão de Cadastros, incluindo campos administrativos persistidos."""
+    df_custom = carregar_motoristas_customizados().copy().fillna("")
     if df_custom.empty:
-      return pd.DataFrame(
-          columns=[
-              "MOTORISTA_CADASTRO",
-              "TIPO_CADASTRO",
-              "BASE_CADASTRO",
-              "EH_FOLGUISTA",
-              "CODIGO_FUNCIONAL",
-              "DATA_CONTRATACAO",
-              "STATUS",
-              "DATA_INATIVACAO",
-          ]
-      )
-
-    # Garante estrutura mínima do cadastro persistente.
-    for c in ["MOTORISTAS", "TIPO", "BASE"]:
+      return pd.DataFrame(columns=[
+          "MOTORISTA_CADASTRO","TIPO_CADASTRO","BASE_CADASTRO","EH_FOLGUISTA",
+          "CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"
+      ])
+    for c in ["MOTORISTAS","TIPO","BASE","CODIGO_FUNCIONAL","DATA_CONTRATACAO","STATUS","DATA_INATIVACAO"]:
       if c not in df_custom.columns:
         df_custom[c] = ""
 
     cadastro = pd.DataFrame({
         "MOTORISTA_CADASTRO": df_custom["MOTORISTAS"].apply(DataUtils.normalizar_texto),
-        "TIPO_CADASTRO": df_custom["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO": "TRUCK"}),
+        "TIPO_CADASTRO": df_custom["TIPO"].apply(DataUtils.normalizar_texto).replace({"TOCO":"TRUCK"}),
         "BASE_CADASTRO": df_custom["BASE"].apply(DataUtils.normalizar_texto),
     })
+    cadastro["CODIGO_FUNCIONAL"] = df_custom["CODIGO_FUNCIONAL"].astype(str).str.strip()
+    cadastro["DATA_CONTRATACAO"] = df_custom["DATA_CONTRATACAO"].astype(str).str.strip()
+    cadastro["STATUS"] = df_custom["STATUS"].astype(str).str.strip().str.upper()
+    cadastro["DATA_INATIVACAO"] = df_custom["DATA_INATIVACAO"].astype(str).str.strip()
 
-    # Elimina linhas vazias e mantém um único cadastro por motorista.
-    cadastro = cadastro[
-        (cadastro["MOTORISTA_CADASTRO"] != "")
-        & (cadastro["TIPO_CADASTRO"] != "")
-    ].copy()
-
+    cadastro = cadastro[(cadastro["MOTORISTA_CADASTRO"] != "") & (cadastro["TIPO_CADASTRO"] != "")].copy()
     cadastro["EH_FOLGUISTA"] = cadastro["TIPO_CADASTRO"].eq("FOLGUISTA")
     cadastro = cadastro.drop_duplicates("MOTORISTA_CADASTRO", keep="last").reset_index(drop=True)
 
-    # Dados complementares administrados pela própria Gestão de Cadastros.
+    # Compatibilidade com arquivos auxiliares já existentes: só preenche o que estiver vazio.
     inativos_dict = carregar_inativos().get("MOTORISTA", {})
     datas_contratacao = carregar_datas_motoristas()
     codigos_funcionais = carregar_codigos_funcionais()
-
-    cadastro["CODIGO_FUNCIONAL"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: str(codigos_funcionais.get(x, "") or "").strip()
+    cadastro["CODIGO_FUNCIONAL"] = cadastro.apply(
+        lambda r: str(r["CODIGO_FUNCIONAL"] or codigos_funcionais.get(r["MOTORISTA_CADASTRO"], "") or "").strip(), axis=1
     )
-    cadastro["DATA_CONTRATACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: str(datas_contratacao.get(x, "") or "").strip()
+    cadastro["DATA_CONTRATACAO"] = cadastro.apply(
+        lambda r: str(r["DATA_CONTRATACAO"] or datas_contratacao.get(r["MOTORISTA_CADASTRO"], "") or "").strip(), axis=1
     )
-    cadastro["STATUS"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: "INATIVO" if x in inativos_dict else "ATIVO"
+    cadastro["STATUS"] = cadastro.apply(
+        lambda r: "INATIVO" if r["MOTORISTA_CADASTRO"] in inativos_dict else (r["STATUS"] or "ATIVO"), axis=1
     )
-    cadastro["DATA_INATIVACAO"] = cadastro["MOTORISTA_CADASTRO"].apply(
-        lambda x: str(inativos_dict.get(x, "") or "").strip()
+    cadastro["DATA_INATIVACAO"] = cadastro.apply(
+        lambda r: str(r["DATA_INATIVACAO"] or inativos_dict.get(r["MOTORISTA_CADASTRO"], "") or "").strip(), axis=1
     )
 
     return cadastro
@@ -1840,23 +1848,23 @@ def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFram
         limite_fim = pd.Timestamp(dt_atual) + pd.Timedelta(days=2)
         cand = cand[cand["VIAGEM_DATA_INICIO"].isna() | (cand["VIAGEM_DATA_INICIO"] <= limite_fim)]
 
-      if cand.empty:
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO NO CICLO"
-        continue
-
       original = DataUtils.normalizar_texto(base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"])
       habitual = placa_habitual.get(original, "")
-      # Regra de segurança: se o motorista informou uma placa diferente da sua placa
-      # habitual, nunca atribuir automaticamente pela viagem. O abastecimento fica
-      # pendente até o administrador confirmar o motorista correto.
+      # Regra de segurança PRIMEIRO: placa não habitual sempre exige validação manual,
+      # mesmo quando não foi encontrada nenhuma viagem no ciclo.
       if original and habitual and placa != habitual:
         base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "PENDENTE DE VALIDAÇÃO — PLACA NÃO HABITUAL"
         base.at[idx, "MOTORISTA_CONSIDERADO"] = ""
         base.at[idx, "MOTORISTA_VIAGEM"] = ""
         base.at[idx, "VIAGENS_CICLO_QTD"] = int(len(cand))
-        cand_tmp = cand.copy()
-        cand_tmp["_MOTORISTA_N"] = cand_tmp["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
-        base.at[idx, "VIAGENS_CICLO_MOTORISTAS"] = " | ".join(sorted([m for m in cand_tmp["_MOTORISTA_N"].dropna().unique().tolist() if m]))
+        if not cand.empty:
+          cand_tmp = cand.copy()
+          cand_tmp["_MOTORISTA_N"] = cand_tmp["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
+          base.at[idx, "VIAGENS_CICLO_MOTORISTAS"] = " | ".join(sorted([m for m in cand_tmp["_MOTORISTA_N"].dropna().unique().tolist() if m]))
+        continue
+
+      if cand.empty:
+        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO NO CICLO"
         continue
 
       if original and not habitual:
