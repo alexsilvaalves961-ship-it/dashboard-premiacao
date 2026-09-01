@@ -1669,33 +1669,29 @@ class DataLoader:
 # VALIDAÇÃO DO MOTORISTA PELO HISTÓRICO DE VIAGENS
 # ================================================================
 def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFrame) -> pd.DataFrame:
-  """Concilia cada abastecimento com o ciclo de viagens entre dois abastecimentos.
+  """Cruza cada abastecimento com a viagem compatível do mesmo veículo.
 
-  Regra operacional da ficha manual:
-  - o abastecimento atual normalmente fecha o ciclo iniciado no abastecimento anterior;
-  - o motorista responsável é identificado pelas viagens realizadas entre os dois KM de
-    abastecimento, usando placa + faixa de odômetro e janela temporal;
-  - se todas as viagens candidatas do ciclo pertencem a um único motorista, a atribuição
-    é automática;
-  - se houver mais de um motorista possível no mesmo ciclo, o sistema não "chuta":
-    mantém o motorista original e marca PENDENTE DE VALIDAÇÃO;
-  - o KM/média continuam sendo calculados pela sequência da placa, independentemente
-    do motorista que ficou associado ao abastecimento.
+  Critérios, em ordem de confiança:
+  1) mesma placa + KM dentro da faixa ODM + data/hora dentro da viagem;
+  2) mesma placa + KM dentro da faixa ODM + mesma data da viagem;
+  3) mesma placa + KM dentro da faixa ODM, somente quando houver um único candidato.
+
+  O motorista original permanece preservado em MOTORISTA_ABASTECIMENTO_ORIGINAL.
+  Quando o cruzamento é confiável, CONDUTOR_NORMALIZADO passa a ser o motorista da viagem.
   """
   base = abastecimentos.copy()
   base["MOTORISTA_ABASTECIMENTO_ORIGINAL"] = base.get("CONDUTOR_NORMALIZADO", "").astype(str)
   base["MOTORISTA_VIAGEM"] = ""
   base["MOTORISTA_CONSIDERADO"] = base["MOTORISTA_ABASTECIMENTO_ORIGINAL"]
-  base["STATUS_VALIDACAO_VIAGEM"] = "SEM ARQUIVO DE VIAGENS" if viagens is None or viagens.empty else "SEM ABASTECIMENTO ANTERIOR"
-  for c in ["VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO", "VIAGENS_CICLO_MOTORISTAS"]:
+  base["STATUS_VALIDACAO_VIAGEM"] = "SEM ARQUIVO DE VIAGENS" if viagens is None or viagens.empty else "NÃO LOCALIZADO"
+  for c in ["VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO"]:
     base[c] = ""
-  for c in ["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL", "VIAGEM_KM_TOTAL", "KM_ABASTECIMENTO_ANTERIOR"]:
+  for c in ["VIAGEM_ODM_INICIAL", "VIAGEM_ODM_FINAL", "VIAGEM_KM_TOTAL"]:
     base[c] = np.nan
-  for c in ["VIAGEM_DATA_INICIO", "VIAGEM_DATA_FIM", "DATA_HORA_ABASTECIMENTO_ANTERIOR"]:
+  for c in ["VIAGEM_DATA_INICIO", "VIAGEM_DATA_FIM"]:
     base[c] = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
-  base["VIAGENS_CICLO_QTD"] = 0
 
-  if base.empty or viagens is None or viagens.empty:
+  if viagens is None or viagens.empty or base.empty:
     return base
 
   viagens = viagens.copy()
@@ -1710,126 +1706,80 @@ def associar_motorista_viagem(abastecimentos: pd.DataFrame, viagens: pd.DataFram
   if viagens.empty:
     return base
 
-  viagens["VIAGEM_DATA_INICIO"] = viagens["VIAGEM_DATA_INICIO"].apply(_parse_datetime_flex)
-  viagens["VIAGEM_DATA_FIM"] = viagens["VIAGEM_DATA_FIM"].apply(_parse_datetime_flex)
   por_placa = {placa: grp for placa, grp in viagens.groupby("PLACA_VIAGEM", sort=False)}
 
-  # A sequência por placa é a referência do ciclo. Ordenamos todas as linhas para
-  # encontrar o abastecimento imediatamente anterior, inclusive de outra competência.
-  base["_TMP_DT"] = pd.to_datetime(base.get("DATA_HORA_ABASTECIMENTO", base.get("DATA_NUM")), errors="coerce")
-  base["_TMP_DT"] = base["_TMP_DT"].apply(lambda x: _parse_datetime_flex(x) if pd.notna(x) else pd.NaT)
-  base = base.sort_values(["PLACA_PADRONIZADA", "KM_ATUAL_NUM", "_TMP_DT"], kind="stable")
-
-  for placa, idxs in base.groupby("PLACA_PADRONIZADA", sort=False).groups.items():
-    idx_list = list(idxs)
-    # Mantém a ordem temporal/odômetro para identificar o abastecimento anterior.
-    idx_list = sorted(idx_list, key=lambda i: (
-        pd.Timestamp(base.at[i, "_TMP_DT"]) if pd.notna(base.at[i, "_TMP_DT"]) else pd.Timestamp("1900-01-01"),
-        float(base.at[i, "KM_ATUAL_NUM"]) if pd.notna(base.at[i, "KM_ATUAL_NUM"]) else float("inf"),
-    ))
-    cand_viagens = por_placa.get(placa)
-    if cand_viagens is None or cand_viagens.empty:
-      for i in idx_list:
-        base.at[i, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO"
+  for idx in base.index:
+    placa = str(base.at[idx, "PLACA_PADRONIZADA"] or "").strip()
+    km = pd.to_numeric(base.at[idx, "KM_ATUAL_NUM"], errors="coerce")
+    if not placa or pd.isna(km) or km <= 0 or placa not in por_placa:
       continue
 
-    for pos, idx in enumerate(idx_list):
-      km_atual = pd.to_numeric(base.at[idx, "KM_ATUAL_NUM"], errors="coerce")
-      if pd.isna(km_atual) or km_atual <= 0:
-        continue
-      if pos == 0:
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "SEM ABASTECIMENTO ANTERIOR"
-        continue
+    cand = por_placa[placa]
+    cand = cand[(cand["_ODM_MIN"] <= float(km)) & (cand["_ODM_MAX"] >= float(km))].copy()
+    if cand.empty:
+      continue
 
-      idx_prev = idx_list[pos - 1]
-      km_prev = pd.to_numeric(base.at[idx_prev, "KM_ATUAL_NUM"], errors="coerce")
-      if pd.isna(km_prev) or km_prev >= km_atual:
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "CICLO KM INVÁLIDO"
-        continue
+    dt_fuel = base.at[idx, "DATA_HORA_ABASTECIMENTO"] if "DATA_HORA_ABASTECIMENTO" in base.columns else pd.NaT
+    dt_fuel = _parse_datetime_flex(dt_fuel)
+    nivel = "KM_UNICO"
 
-      dt_atual = base.at[idx, "_TMP_DT"]
-      dt_prev = base.at[idx_prev, "_TMP_DT"]
-      if pd.isna(dt_atual):
-        dt_atual = base.at[idx, "DATA_NUM"] if "DATA_NUM" in base.columns else pd.NaT
-      if pd.isna(dt_prev):
-        dt_prev = base.at[idx_prev, "DATA_NUM"] if "DATA_NUM" in base.columns else pd.NaT
-      dt_atual = _parse_datetime_flex(dt_atual)
-      dt_prev = _parse_datetime_flex(dt_prev)
-
-      base.at[idx, "KM_ABASTECIMENTO_ANTERIOR"] = float(km_prev)
-      if pd.notna(dt_prev):
-        base.at[idx, "DATA_HORA_ABASTECIMENTO_ANTERIOR"] = dt_prev
-
-      # O ciclo é o intervalo entre o KM do abastecimento anterior e o KM do atual.
-      # Uma viagem candidata deve cruzar esse intervalo e ficar temporalmente entre
-      # os abastecimentos, admitindo até 2 dias após o fim da viagem para o fechamento
-      # do tanque (caso mostrado na ficha: viagem termina dia 30 e abastece dia 31).
-      ciclo_ini = float(km_prev)
-      ciclo_fim = float(km_atual)
-      cand = cand_viagens.copy()
-      cand = cand[(cand["_ODM_MAX"] > ciclo_ini) & (cand["_ODM_MIN"] <= ciclo_fim)].copy()
-
-      if pd.notna(dt_prev):
-        cand = cand[cand["VIAGEM_DATA_FIM"].isna() | (cand["VIAGEM_DATA_FIM"] >= pd.Timestamp(dt_prev) - pd.Timedelta(days=1))]
-      if pd.notna(dt_atual):
-        limite_fim = pd.Timestamp(dt_atual) + pd.Timedelta(days=2)
-        cand = cand[cand["VIAGEM_DATA_INICIO"].isna() | (cand["VIAGEM_DATA_INICIO"] <= limite_fim)]
-
-      if cand.empty:
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "NÃO LOCALIZADO NO CICLO"
-        continue
-
-      cand["_MOTORISTA_N"] = cand["MOTORISTA_VIAGEM"].apply(DataUtils.normalizar_texto)
-      motoristas = sorted([m for m in cand["_MOTORISTA_N"].dropna().unique().tolist() if m])
-      base.at[idx, "VIAGENS_CICLO_QTD"] = int(len(cand))
-      base.at[idx, "VIAGENS_CICLO_MOTORISTAS"] = " | ".join(motoristas)
-
-      # Soma a cobertura de KM do ciclo por motorista. Se somente um motorista
-      # executou o ciclo, a associação é segura mesmo com várias pernas (carregado/vazio).
-      coberturas = {}
-      for _, v in cand.iterrows():
-        inicio = max(float(v["_ODM_MIN"]), ciclo_ini)
-        fim = min(float(v["_ODM_MAX"]), ciclo_fim)
-        cobertura = max(0.0, fim - inicio)
-        mot = v["_MOTORISTA_N"]
-        coberturas[mot] = coberturas.get(mot, 0.0) + cobertura
-
-      if len(motoristas) == 1:
-        motorista_viagem = motoristas[0]
-        escolhido = cand[cand["_MOTORISTA_N"] == motorista_viagem].sort_values(["VIAGEM_DATA_FIM", "_ODM_MAX"], kind="stable").iloc[-1]
-        base.at[idx, "MOTORISTA_VIAGEM"] = motorista_viagem
-        base.at[idx, "MOTORISTA_CONSIDERADO"] = motorista_viagem
-        original = DataUtils.normalizar_texto(base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"])
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "VALIDADO PELO CICLO" if original == motorista_viagem else "CORRIGIDO PELO CICLO"
-        base.at[idx, "VIAGEM_ORIGEM"] = str(escolhido.get("VIAGEM_ORIGEM", ""))
-        base.at[idx, "VIAGEM_DESTINO"] = str(escolhido.get("VIAGEM_DESTINO", ""))
-        base.at[idx, "VIAGEM_ARQUIVO"] = str(escolhido.get("VIAGEM_ARQUIVO", ""))
-        base.at[idx, "VIAGEM_ODM_INICIAL"] = escolhido.get("VIAGEM_ODM_INICIAL", np.nan)
-        base.at[idx, "VIAGEM_ODM_FINAL"] = escolhido.get("VIAGEM_ODM_FINAL", np.nan)
-        base.at[idx, "VIAGEM_KM_TOTAL"] = escolhido.get("VIAGEM_KM_TOTAL", np.nan)
-        base.at[idx, "VIAGEM_DATA_INICIO"] = escolhido.get("VIAGEM_DATA_INICIO", pd.NaT)
-        base.at[idx, "VIAGEM_DATA_FIM"] = escolhido.get("VIAGEM_DATA_FIM", pd.NaT)
+    if pd.notna(dt_fuel):
+      por_datahora = cand[
+          cand["VIAGEM_DATA_INICIO"].notna()
+          & cand["VIAGEM_DATA_FIM"].notna()
+          & (cand["VIAGEM_DATA_INICIO"] <= dt_fuel)
+          & (cand["VIAGEM_DATA_FIM"] >= dt_fuel)
+      ].copy()
+      if not por_datahora.empty:
+        cand = por_datahora
+        nivel = "DATA_HORA"
       else:
-        # Não atribuir automaticamente quando o mesmo ciclo contém mais de um motorista.
-        # O abastecimento permanece com o motorista original, mas fica explícito para conferência.
-        base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "PENDENTE DE VALIDAÇÃO — MÚLTIPLOS MOTORISTAS"
-        mot_principal = max(coberturas, key=coberturas.get) if coberturas else ""
-        # Mostra a maior cobertura apenas como referência, sem alterar o responsável.
-        if mot_principal:
-          cand_principal = cand[cand["_MOTORISTA_N"] == mot_principal]
-          if not cand_principal.empty:
-            escolhido = cand_principal.sort_values(["VIAGEM_DATA_FIM", "_ODM_MAX"], kind="stable").iloc[-1]
-            base.at[idx, "VIAGEM_ORIGEM"] = str(escolhido.get("VIAGEM_ORIGEM", ""))
-            base.at[idx, "VIAGEM_DESTINO"] = str(escolhido.get("VIAGEM_DESTINO", ""))
-            base.at[idx, "VIAGEM_ARQUIVO"] = str(escolhido.get("VIAGEM_ARQUIVO", ""))
-            base.at[idx, "VIAGEM_ODM_INICIAL"] = escolhido.get("VIAGEM_ODM_INICIAL", np.nan)
-            base.at[idx, "VIAGEM_ODM_FINAL"] = escolhido.get("VIAGEM_ODM_FINAL", np.nan)
-            base.at[idx, "VIAGEM_KM_TOTAL"] = escolhido.get("VIAGEM_KM_TOTAL", np.nan)
-            base.at[idx, "VIAGEM_DATA_INICIO"] = escolhido.get("VIAGEM_DATA_INICIO", pd.NaT)
-            base.at[idx, "VIAGEM_DATA_FIM"] = escolhido.get("VIAGEM_DATA_FIM", pd.NaT)
+        data_fuel = pd.Timestamp(dt_fuel).normalize()
+        por_data = cand[
+            cand["VIAGEM_DATA_INICIO"].notna()
+            & cand["VIAGEM_DATA_FIM"].notna()
+            & (cand["VIAGEM_DATA_INICIO"].dt.normalize() <= data_fuel)
+            & (cand["VIAGEM_DATA_FIM"].dt.normalize() >= data_fuel)
+        ].copy()
+        if not por_data.empty:
+          cand = por_data
+          nivel = "DATA"
 
-  base = base.drop(columns=["_TMP_DT"], errors="ignore")
-  # O cálculo de prêmio usa o motorista considerado; nos casos pendentes, permanece o original.
+    if nivel == "KM_UNICO" and len(cand) != 1:
+      # Sem data confiável e com mais de uma viagem compatível, não arriscar atribuição.
+      continue
+
+    # Desempate determinístico: viagem temporalmente mais próxima do abastecimento;
+    # sem horário, usa proximidade do centro da faixa de ODM.
+    if pd.notna(dt_fuel) and cand["VIAGEM_DATA_INICIO"].notna().any():
+      inicio = cand["VIAGEM_DATA_INICIO"].fillna(dt_fuel)
+      fim = cand["VIAGEM_DATA_FIM"].fillna(dt_fuel)
+      meio = inicio + (fim - inicio) / 2
+      cand = cand.assign(_DIST_TEMPO=(meio - dt_fuel).abs())
+      cand = cand.sort_values(["_DIST_TEMPO", "_ODM_MIN"], kind="stable")
+    else:
+      meio_km = (cand["_ODM_MIN"] + cand["_ODM_MAX"]) / 2
+      cand = cand.assign(_DIST_KM=(meio_km - float(km)).abs())
+      cand = cand.sort_values(["_DIST_KM", "_ODM_MIN"], kind="stable")
+
+    viagem = cand.iloc[0]
+    motorista_viagem = DataUtils.normalizar_texto(viagem.get("MOTORISTA_VIAGEM", ""))
+    if not motorista_viagem:
+      continue
+
+    base.at[idx, "MOTORISTA_VIAGEM"] = motorista_viagem
+    base.at[idx, "MOTORISTA_CONSIDERADO"] = motorista_viagem
+    base.at[idx, "STATUS_VALIDACAO_VIAGEM"] = "VALIDADO" if base.at[idx, "MOTORISTA_ABASTECIMENTO_ORIGINAL"] == motorista_viagem else "CORRIGIDO PELA VIAGEM"
+    base.at[idx, "VIAGEM_ORIGEM"] = str(viagem.get("VIAGEM_ORIGEM", ""))
+    base.at[idx, "VIAGEM_DESTINO"] = str(viagem.get("VIAGEM_DESTINO", ""))
+    base.at[idx, "VIAGEM_ARQUIVO"] = str(viagem.get("VIAGEM_ARQUIVO", ""))
+    base.at[idx, "VIAGEM_ODM_INICIAL"] = viagem.get("VIAGEM_ODM_INICIAL", np.nan)
+    base.at[idx, "VIAGEM_ODM_FINAL"] = viagem.get("VIAGEM_ODM_FINAL", np.nan)
+    base.at[idx, "VIAGEM_KM_TOTAL"] = viagem.get("VIAGEM_KM_TOTAL", np.nan)
+    base.at[idx, "VIAGEM_DATA_INICIO"] = viagem.get("VIAGEM_DATA_INICIO", pd.NaT)
+    base.at[idx, "VIAGEM_DATA_FIM"] = viagem.get("VIAGEM_DATA_FIM", pd.NaT)
+
+  # O cálculo de prêmio e todas as telas passam a usar o motorista considerado pela viagem.
   base["CONDUTOR_NORMALIZADO"] = base["MOTORISTA_CONSIDERADO"].apply(DataUtils.normalizar_texto)
   return base
 
@@ -4150,11 +4100,10 @@ with tabs[11]:
     st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
 with tabs[2]:
     st.subheader("Detalhamento dos Abastecimentos")
-    st.caption("O motorista considerado no cálculo é conciliado pelo ciclo entre abastecimentos: KM anterior → viagens realizadas → KM do abastecimento atual. Se o ciclo envolver mais de um motorista, fica pendente para validação.")
+    st.caption("O motorista considerado no cálculo é validado pelo histórico de viagens quando existe correspondência segura por placa, KM e data/hora.")
     cols_auditoria = [
         "DATA_FILTRO", "MOTORISTA_ABASTECIMENTO_ORIGINAL", "MOTORISTA_VIAGEM",
-        "MOTORISTA_CONSIDERADO", "STATUS_VALIDACAO_VIAGEM", "KM_ABASTECIMENTO_ANTERIOR",
-        "VIAGENS_CICLO_QTD", "VIAGENS_CICLO_MOTORISTAS", "PLACA_PADRONIZADA",
+        "MOTORISTA_CONSIDERADO", "STATUS_VALIDACAO_VIAGEM", "PLACA_PADRONIZADA",
         "TIPO", "KM_ATUAL_NUM", "QTDE_NUM", "VALOR_NUM",
         "VIAGEM_ORIGEM", "VIAGEM_DESTINO", "VIAGEM_ARQUIVO",
     ]
