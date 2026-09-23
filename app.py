@@ -516,7 +516,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
     """Grava um arquivo de dados criando snapshot antes da primeira gravação da sequência."""
     criar_backup_automatico("antes_salvar")
     garantir_diretorio()
-    _salvar_csv_com_backup(df, caminho)
+    df.to_csv(caminho, index=False, encoding="utf-8-sig")
 
 
 def carregar_ausencias() -> pd.DataFrame:
