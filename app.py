@@ -3,6 +3,9 @@ import base64
 import hmac
 import hashlib
 import re
+import io
+import zipfile
+from pathlib import Path
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, date
@@ -288,7 +291,7 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
 
     arq = _arquivo_historico_abastecimentos(mm, yyyy)
     # Fonte mensal substitui completamente o snapshot anterior da mesma competência.
-    part.to_csv(arq, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(part, arq)
     mensal_processados.add((mm, yyyy))
 
   # Migração do legado somente para competências ainda sem histórico mensal.
@@ -325,7 +328,7 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
           for c in cols:
             if c not in part.columns:
               part[c] = ""
-          part[cols].to_csv(arq, index=False, encoding="utf-8-sig")
+          _salvar_csv_com_backup(part[cols], arq)
 
 def _carregar_historico_abastecimentos_total():
   registros=[]
@@ -383,6 +386,139 @@ def garantir_diretorio():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
+# ================================================================
+# BACKUP / PROTEÇÃO DOS DADOS INSERIDOS NO APLICATIVO
+# ================================================================
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+BACKUP_RETENTION = 20
+_BACKUP_AUTO_LAST_TS = 0.0
+_BACKUP_AUTO_MIN_INTERVAL = 60.0  # um snapshot antes de uma sequência de gravações
+
+
+def _arquivos_de_dados_para_backup():
+    """Retorna somente os arquivos de dados persistentes do aplicativo.
+
+    Entradas mensais Excel e código-fonte não entram no backup de dados do aplicativo.
+    Históricos CSV, cadastros e demais arquivos de estado entram.
+    """
+    if not DATA_DIR or not os.path.isdir(DATA_DIR):
+        return []
+    extensoes = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
+    arquivos = []
+    for root, dirs, files in os.walk(DATA_DIR):
+        # O diretório de backups não pode entrar dentro de outro backup.
+        dirs[:] = [d for d in dirs if os.path.abspath(os.path.join(root, d)) != os.path.abspath(BACKUP_DIR)]
+        for nome in files:
+            caminho = os.path.join(root, nome)
+            if Path(nome).suffix.lower() in extensoes:
+                arquivos.append(caminho)
+    return sorted(arquivos)
+
+
+def _nome_backup(prefixo="backup"):
+    return f"{prefixo}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+
+
+def criar_backup_automatico(motivo="auto"):
+    """Cria um snapshot local antes de uma gravação, sem interromper o salvamento."""
+    global _BACKUP_AUTO_LAST_TS
+    agora = datetime.now().timestamp()
+    if agora - _BACKUP_AUTO_LAST_TS < _BACKUP_AUTO_MIN_INTERVAL:
+        return None
+    try:
+        garantir_diretorio()
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        caminho_zip = os.path.join(BACKUP_DIR, _nome_backup(f"auto_{motivo}"))
+        arquivos = _arquivos_de_dados_para_backup()
+        with zipfile.ZipFile(caminho_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            manifest = [
+                f"Data/hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                f"Motivo: {motivo}",
+                f"DATA_DIR: {os.path.abspath(DATA_DIR or '.')}",
+                "Arquivos:",
+            ]
+            base = os.path.abspath(DATA_DIR or ".")
+            for caminho in arquivos:
+                rel = os.path.relpath(caminho, base)
+                zf.write(caminho, arcname=rel)
+                manifest.append(rel)
+            zf.writestr("MANIFESTO.txt", "\n".join(manifest))
+        _BACKUP_AUTO_LAST_TS = agora
+        _limpar_backups_antigos()
+        return caminho_zip
+    except Exception as exc:
+        print(f"Aviso: não foi possível criar backup automático: {exc}")
+        return None
+
+
+def _limpar_backups_antigos():
+    try:
+        if not os.path.isdir(BACKUP_DIR):
+            return
+        arquivos = [
+            os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
+            if n.lower().endswith(".zip")
+        ]
+        arquivos.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for caminho in arquivos[BACKUP_RETENTION:]:
+            try:
+                os.remove(caminho)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def criar_backup_manual_bytes():
+    """Monta um backup completo dos dados atuais em memória para download."""
+    memoria = io.BytesIO()
+    arquivos = _arquivos_de_dados_para_backup()
+    base = os.path.abspath(DATA_DIR or ".")
+    with zipfile.ZipFile(memoria, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest = [
+            f"Data/hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+            f"DATA_DIR: {base}",
+            "Arquivos:",
+        ]
+        for caminho in arquivos:
+            rel = os.path.relpath(caminho, base)
+            zf.write(caminho, arcname=rel)
+            manifest.append(rel)
+        zf.writestr("MANIFESTO.txt", "\n".join(manifest))
+    memoria.seek(0)
+    return memoria.getvalue()
+
+
+def _listar_backups_salvos():
+    try:
+        if not os.path.isdir(BACKUP_DIR):
+            return []
+        dados = []
+        for nome in os.listdir(BACKUP_DIR):
+            if not nome.lower().endswith(".zip"):
+                continue
+            caminho = os.path.join(BACKUP_DIR, nome)
+            try:
+                dados.append({
+                    "ARQUIVO": nome,
+                    "DATA": datetime.fromtimestamp(os.path.getmtime(caminho)).strftime('%d/%m/%Y %H:%M:%S'),
+                    "TAMANHO": f"{os.path.getsize(caminho)/1024:.1f} KB",
+                    "CAMINHO": caminho,
+                })
+            except OSError:
+                pass
+        return sorted(dados, key=lambda x: x["DATA"], reverse=True)
+    except Exception:
+        return []
+
+
+def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
+    """Grava um arquivo de dados criando snapshot antes da primeira gravação da sequência."""
+    criar_backup_automatico("antes_salvar")
+    garantir_diretorio()
+    _salvar_csv_com_backup(df, caminho)
+
+
 def carregar_ausencias() -> pd.DataFrame:
   """Carrega as ausências salvas em disco ou retorna DataFrame vazio."""
   if os.path.exists(ARQUIVO_AUSENCIAS):
@@ -410,7 +546,7 @@ def salvar_ausencias(df: pd.DataFrame):
   """Salva as ausências no arquivo CSV com codificação UTF-8."""
   try:
     garantir_diretorio()
-    df.to_csv(ARQUIVO_AUSENCIAS, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_AUSENCIAS)
   except Exception as e:
     print(f"Erro ao salvar ausências: {e}")
 
@@ -453,7 +589,7 @@ def salvar_desclassificacoes(df: pd.DataFrame):
   """Salva as desclassificações no arquivo CSV com codificação UTF-8."""
   try:
     garantir_diretorio()
-    df.to_csv(ARQUIVO_DESCLASSIFICACOES, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_DESCLASSIFICACOES)
   except Exception as e:
     print(f"Erro ao salvar desclassificações: {e}")
 
@@ -501,7 +637,7 @@ def salvar_categorias_customizadas(mapa: dict):
         ],
         columns=["MOTORISTA_CHAVE", "CATEGORIA_ESCOLHIDA"],
     )
-    df.to_csv(ARQUIVO_CATEGORIAS_CUSTOM, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_CATEGORIAS_CUSTOM)
   except Exception as e:
     print(f"Erro ao salvar categorias customizadas: {e}")
 
@@ -525,7 +661,7 @@ def carregar_categorias_vigencia() -> pd.DataFrame:
   else:
     fim = dt_ref.replace(day=25); ini = (fim - pd.DateOffset(months=1)).replace(day=26)
   df = pd.DataFrame([{"MOTORISTA_CHAVE":str(k).strip().upper(),"CATEGORIA_ESCOLHIDA":DataUtils.normalizar_texto(v),"DATA_INICIO":ini.strftime("%d/%m/%Y"),"DATA_FIM":fim.strftime("%d/%m/%Y")} for k,v in legado.items() if str(k).strip() and str(v).strip()])
-  try: df.to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+  try: _salvar_csv_com_backup(df, ARQUIVO_CATEGORIAS_VIGENCIA)
   except Exception as e: print(f"Erro ao criar arquivo de vigência de categorias: {e}")
   return df[cols] if not df.empty else pd.DataFrame(columns=cols)
 
@@ -534,7 +670,7 @@ def salvar_categorias_vigencia(df: pd.DataFrame):
     garantir_diretorio(); cols=["MOTORISTA_CHAVE","CATEGORIA_ESCOLHIDA","DATA_INICIO","DATA_FIM"]; out=df.copy()
     for c in cols:
       if c not in out.columns: out[c] = ""
-    out[cols].fillna("").to_csv(ARQUIVO_CATEGORIAS_VIGENCIA,index=False,encoding="utf-8-sig")
+    _salvar_csv_com_backup(out[cols].fillna(""), ARQUIVO_CATEGORIAS_VIGENCIA)
   except Exception as e: print(f"Erro ao salvar vigências de categorias: {e}")
 
 def categorias_ativas_na_competencia(df_vig: pd.DataFrame, data_ini, data_fim) -> dict:
@@ -564,7 +700,7 @@ def carregar_frota_customizada() -> pd.DataFrame:
 def salvar_frota_customizada(df: pd.DataFrame):
   try:
     garantir_diretorio()
-    df.to_csv(ARQUIVO_FROTA_CUSTOM, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_FROTA_CUSTOM)
   except Exception as e:
     print(f"Erro ao salvar frota customizada: {e}")
 
@@ -589,7 +725,7 @@ def carregar_motoristas_customizados() -> pd.DataFrame:
 def salvar_motoristas_customizados(df: pd.DataFrame):
   try:
     garantir_diretorio()
-    df.to_csv(ARQUIVO_MOTORISTAS_CUSTOM, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_MOTORISTAS_CUSTOM)
   except Exception as e:
     print(f"Erro ao salvar motoristas customizados: {e}")
 
@@ -696,7 +832,7 @@ def _carregar_eventos_pilar(caminho: str) -> pd.DataFrame:
 def _salvar_eventos_pilar(df: pd.DataFrame, caminho: str):
     try:
         garantir_diretorio()
-        df.to_csv(caminho, index=False, encoding="utf-8-sig")
+        _salvar_csv_com_backup(df, caminho)
     except Exception as e:
         print(f"Erro ao salvar eventos {caminho}: {e}")
 
@@ -868,7 +1004,7 @@ def salvar_data_contratacao_motorista(motorista: str, data_contratacao: str):
         "MOTORISTA": motorista,
         "DATA_CONTRATACAO": data_contratacao,
     }])], ignore_index=True)
-  df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+  _salvar_csv_com_backup(df, ARQUIVO_DATAS_MOTORISTAS)
 
 
 def carregar_codigos_funcionais() -> dict:
@@ -912,7 +1048,7 @@ def salvar_codigo_funcional_motorista(motorista: str, codigo: str):
         "MOTORISTA": motorista,
         "CODIGO_FUNCIONAL": codigo,
     }])], ignore_index=True)
-  df.to_csv(ARQUIVO_CODIGOS_FUNCIONAIS, index=False, encoding="utf-8-sig")
+  _salvar_csv_com_backup(df, ARQUIVO_CODIGOS_FUNCIONAIS)
 
 
 def atualizar_data_inativacao_motorista(motorista: str, data_inativacao: str):
@@ -931,7 +1067,7 @@ def atualizar_data_inativacao_motorista(motorista: str, data_inativacao: str):
   mask = (df["TIPO"] == "MOTORISTA") & (df["VALOR"] == motorista)
   if mask.any():
     df.loc[mask, "DATA_INATIVACAO"] = str(data_inativacao or "").strip()
-    df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_INATIVOS)
 
 
 def alternar_inativo(tipo: str, valor: str, inativar: bool = True, data_inativacao: str = ""):
@@ -963,7 +1099,7 @@ def alternar_inativo(tipo: str, valor: str, inativar: bool = True, data_inativac
     df = df[~mask]
 
   try:
-    df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(df, ARQUIVO_INATIVOS)
   except Exception as e:
     print(f"Erro ao salvar inativos: {e}")
 
@@ -3178,7 +3314,7 @@ def salvar_usuarios_acesso(df: pd.DataFrame):
         if c not in out.columns:
             out[c] = ""
     out = out[cols].copy()
-    out.to_csv(ARQUIVO_USUARIOS_ACESSO, index=False, encoding="utf-8-sig")
+    _salvar_csv_com_backup(out, ARQUIVO_USUARIOS_ACESSO)
 
 def garantir_usuarios_iniciais():
     df = carregar_usuarios_acesso()
@@ -3529,7 +3665,9 @@ for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Com
 tab_labels=["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","🚚 Múltiplas Placas","🏷️ Categorias por Placa","⚙️ Cadastros","📄 Recibos","🏥 Ausências","🚨 Excesso de Velocidade","⏱️ Controle de Jornada","🚫 Desclassificações","👔 Relatório RH"]
 if is_admin:
     tab_labels.append("🔐 Usuários")
+    tab_labels.append("💾 Backup e Segurança")
 tabs=st.tabs(tab_labels)
+BACKUP_TAB_INDEX = len(tab_labels) - 1 if is_admin else None
 with tabs[0]:
     st.markdown('<div class="dashboard-shell">', unsafe_allow_html=True)
     st.markdown("### 📈 Visão Gerencial da Competência")
@@ -4021,7 +4159,7 @@ with tabs[5]:
                         cod_df["MOTORISTA"] = cod_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
                         cod_df = cod_df[cod_df["MOTORISTA"] != motorista_editar_norm]
                     cod_df = pd.concat([cod_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "CODIGO_FUNCIONAL": str(codigo_novo_edit or '').strip()}])], ignore_index=True)
-                    cod_df.to_csv(ARQUIVO_CODIGOS_FUNCIONAIS, index=False, encoding="utf-8-sig")
+                    cod__salvar_csv_com_backup(df, ARQUIVO_CODIGOS_FUNCIONAIS)
 
                     # Data de contratação
                     dt_df = pd.DataFrame({"MOTORISTA": list(datas_edit.keys()), "DATA_CONTRATACAO": list(datas_edit.values())})
@@ -4029,7 +4167,7 @@ with tabs[5]:
                         dt_df["MOTORISTA"] = dt_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
                         dt_df = dt_df[dt_df["MOTORISTA"] != motorista_editar_norm]
                     dt_df = pd.concat([dt_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "DATA_CONTRATACAO": str(data_contratacao_nova_edit or '').strip()}])], ignore_index=True)
-                    dt_df.to_csv(ARQUIVO_DATAS_MOTORISTAS, index=False, encoding="utf-8-sig")
+                    dt__salvar_csv_com_backup(df, ARQUIVO_DATAS_MOTORISTAS)
 
                     # Status / data de inativação
                     inat_df = pd.DataFrame(columns=["TIPO", "VALOR", "DATA_INATIVACAO"])
@@ -4045,7 +4183,7 @@ with tabs[5]:
                     inat_df = inat_df[~((inat_df["TIPO"] == "MOTORISTA") & (inat_df["VALOR"].isin([motorista_editar_norm, nome_novo_norm])))]
                     if status_novo_edit == "INATIVO":
                         inat_df = pd.concat([inat_df, pd.DataFrame([{"TIPO": "MOTORISTA", "VALOR": nome_novo_norm, "DATA_INATIVACAO": str(data_inativacao_nova_edit or '').strip()}])], ignore_index=True)
-                    inat_df.to_csv(ARQUIVO_INATIVOS, index=False, encoding="utf-8-sig")
+                    inat__salvar_csv_com_backup(df, ARQUIVO_INATIVOS)
 
                 st.cache_resource.clear()
                 st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
@@ -4455,6 +4593,95 @@ if is_admin:
                     salvar_usuarios_acesso(usuarios_df)
                     st.success("Usuário atualizado.")
                     st.rerun()
+
+if is_admin:
+    with tabs[BACKUP_TAB_INDEX]:
+        st.subheader("💾 Backup e Segurança dos Dados")
+        st.info(
+            "Esta área protege os dados inseridos diretamente no aplicativo: cadastros, "
+            "códigos funcionais, datas, ausências, desclassificações, categorias, usuários, "
+            "controles e históricos. O código cria um snapshot automático antes das gravações."
+        )
+
+        volume_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+        data_abs = os.path.abspath(DATA_DIR or ".")
+        colb1, colb2, colb3 = st.columns(3)
+        with colb1:
+            st.metric("Arquivos de dados", len(_arquivos_de_dados_para_backup()))
+        with colb2:
+            backups_info = _listar_backups_salvos()
+            st.metric("Backups armazenados", len(backups_info))
+        with colb3:
+            if volume_mount:
+                st.success("🟢 Volume Railway detectado")
+            else:
+                st.warning("🟡 Sem Volume Railway detectado")
+
+        st.caption(f"Pasta de dados atual: {data_abs}")
+        if volume_mount:
+            st.caption(f"Volume Railway: {volume_mount}")
+        else:
+            st.warning(
+                "Atenção: sem um Volume persistente, os arquivos gravados no sistema podem "
+                "ser perdidos quando a hospedagem reconstruir o serviço. No Railway, o Volume "
+                "precisa estar montado na mesma pasta definida em DATA_DIR."
+            )
+
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("📦 Criar backup agora", key="backup_now", type="primary", use_container_width=True):
+                try:
+                    caminho = None
+                    garantir_diretorio()
+                    os.makedirs(BACKUP_DIR, exist_ok=True)
+                    caminho = os.path.join(BACKUP_DIR, _nome_backup("manual"))
+                    dados = criar_backup_manual_bytes()
+                    with open(caminho, "wb") as f: f.write(dados)
+                    _limpar_backups_antigos()
+                    st.success(f"Backup criado com sucesso: {os.path.basename(caminho)}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível criar o backup: {exc}")
+        with b2:
+            dados_atual = criar_backup_manual_bytes()
+            st.download_button(
+                "⬇️ Baixar backup dos dados atuais",
+                data=dados_atual,
+                file_name=f"backup_dados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                mime="application/zip",
+                key="backup_download_now",
+                use_container_width=True,
+            )
+
+        backups_info = _listar_backups_salvos()
+        if backups_info:
+            st.markdown("#### 📚 Backups automáticos e manuais armazenados")
+            tabela_bk = pd.DataFrame(backups_info)[["ARQUIVO", "DATA", "TAMANHO"]]
+            st.dataframe(tabela_bk, use_container_width=True, hide_index=True)
+
+            nomes_bk = [x["ARQUIVO"] for x in backups_info]
+            sel_bk = st.selectbox("Selecionar backup para baixar", nomes_bk, key="backup_sel")
+            item_bk = next((x for x in backups_info if x["ARQUIVO"] == sel_bk), None)
+            if item_bk and os.path.exists(item_bk["CAMINHO"]):
+                with open(item_bk["CAMINHO"], "rb") as f:
+                    st.download_button(
+                        "⬇️ Baixar backup selecionado",
+                        data=f.read(),
+                        file_name=item_bk["ARQUIVO"],
+                        mime="application/zip",
+                        key="backup_download_selected",
+                        use_container_width=True,
+                    )
+        else:
+            st.info("Nenhum backup automático/manual foi armazenado ainda. Crie o primeiro usando os botões acima.")
+
+        st.markdown("#### 🛡️ O que fica protegido")
+        st.write(
+            "Motoristas e seus dados administrativos, placas, categorias por placa, "
+            "ausências, desclassificações, controle de jornada, excesso de velocidade, "
+            "usuários/permissões e históricos de abastecimentos."
+        )
+
 
 def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False, df_automatico=None):
     with tab:
