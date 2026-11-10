@@ -3153,6 +3153,11 @@ def gerar_html_unico_recibo(
   hdr_motivo_bg = "#EF4444" if eh_desclassificado else "#D0E0F0"
   hdr_motivo_fg = "#FFFFFF" if eh_desclassificado else "#000000"
 
+  bg_motivo = "#FEE2E2" if eh_desclassificado else "#FFFFFF"
+  fg_motivo = "#991B1B" if eh_desclassificado else "#000000"
+  hdr_motivo_bg = "#EF4444" if eh_desclassificado else "#D0E0F0"
+  hdr_motivo_fg = "#FFFFFF" if eh_desclassificado else "#000000"
+
   return f"""
     <div class="recibo-card" style="background-color: #FFFFFF; padding: 28px; border-radius: 12px; max-width: 650px; margin: 0 auto 20px auto; font-family: Arial, sans-serif; color: #000000; border: 1px solid #CBD5E1; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); page-break-after: always; break-after: page;">
         <div style="text-align: center; margin-bottom: 12px;">
