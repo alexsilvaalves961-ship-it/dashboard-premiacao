@@ -20,16 +20,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ================================================================
-# IMPORTAÇÕES DE AUTOMAÇÃO (SELENIUM)
-# ================================================================
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-
-
-# ================================================================
 # AUTOMAÇÃO DE EXTRAÇÃO DE ABASTECIMENTOS (PORTAL CIAPETRO)
 # ================================================================
 def executar_automacao_abastecimentos_ciapetro(mes_ano_str="08_2026"):
