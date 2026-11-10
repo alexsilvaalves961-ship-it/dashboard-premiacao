@@ -3279,6 +3279,345 @@ def gerar_recibos_lote(
 st.set_page_config(page_title="Dashboard do Prêmio de Motoristas", page_icon="🚚", layout="wide", initial_sidebar_state="expanded")
 
 # ================================================================
+# SISTEMA DE TEMAS VISUAIS (seletor estilo sistemas corporativos)
+# ================================================================
+import json as _json
+import html as _html
+
+TEMA_PADRAO = "dinamico"
+ARQUIVO_TEMAS_USUARIOS = os.path.join(DATA_DIR, "temas_usuarios.json")
+
+TEMAS = {
+    "dinamico": {
+        "nome": "Dinâmico", "icone": "⚡",
+        "desc": "Escuro com acentos vivos e cartões coloridos (visual do Robô Fiscal).",
+        "scheme": "dark",
+        "bg": "radial-gradient(ellipse at 8% 0%, rgba(56,189,248,.11), transparent 36%), radial-gradient(ellipse at 96% 4%, rgba(167,139,250,.11), transparent 32%), #0a1020",
+        "bg_solid": "#0a1020", "side": "#0b1325",
+        "surface": "#101a2e", "surface2": "#14223c", "line": "#25364f",
+        "text": "#eaf1ff", "muted": "#8fa3c0",
+        "accent": "#38bdf8", "tab": "#f59e0b",
+        "k": ["#38bdf8", "#22c55e", "#f59e0b", "#a78bfa", "#ef4444", "#22d3ee"],
+        "hero": "linear-gradient(110deg,#14223c 0%,#101a2e 60%,#122238 100%)",
+        "hero_text": "#f4f8ff", "hero_muted": "#9fb4d2",
+        "input": "#0c1628", "btn": "#16253f", "btn_text": "#eaf1ff", "btn_hover": "#1d3556",
+        "shadow": "0 8px 26px rgba(0,0,0,.32)", "radius": "16px", "lift": "-3px",
+        "periodo_bg": "linear-gradient(135deg,#38bdf8,#818cf8)", "periodo_text": "#04111f",
+        "logo_bg": "linear-gradient(145deg,#38bdf8,#6366f1)",
+        "chart": ["#38bdf8", "#22c55e", "#f59e0b", "#a78bfa", "#ef4444", "#22d3ee"],
+    },
+    "azul": {
+        "nome": "Azul Ciapetro", "icone": "🔷",
+        "desc": "Identidade da Ciapetro: azul-marinho, azul ciano e amarelo.",
+        "scheme": "dark",
+        "bg": "linear-gradient(160deg,#0a1140 0%,#0f1950 55%,#091037 100%)",
+        "bg_solid": "#0a1140", "side": "#09103a",
+        "surface": "#141f66", "surface2": "#1a2776", "line": "#2d3d9a",
+        "text": "#f2f6ff", "muted": "#a9b8f0",
+        "accent": "#0099DA", "tab": "#FFD400",
+        "k": ["#2bb5f0", "#35d08a", "#FFD400", "#8d9bff", "#ff6b7a", "#5fd4ff"],
+        "hero": "linear-gradient(110deg,#17215C 0%,#0b5f9e 100%)",
+        "hero_text": "#ffffff", "hero_muted": "#c9d8ff",
+        "input": "#0e1752", "btn": "#0099DA", "btn_text": "#ffffff", "btn_hover": "#14aef5",
+        "shadow": "0 8px 24px rgba(3,8,40,.38)", "radius": "14px", "lift": "-2px",
+        "periodo_bg": "#FFD400", "periodo_text": "#000000",
+        "logo_bg": "linear-gradient(145deg,#FFD400,#e0a800)",
+        "chart": ["#0099DA", "#FFD400", "#5fd4ff", "#8d9bff", "#35d08a", "#ff9f43"],
+    },
+    "black": {
+        "nome": "Black", "icone": "🌑",
+        "desc": "Preto puro, minimalista, com destaque dourado.",
+        "scheme": "dark",
+        "bg": "#050505", "bg_solid": "#050505", "side": "#0b0b0b",
+        "surface": "#111111", "surface2": "#181818", "line": "#262626",
+        "text": "#f5f5f5", "muted": "#9b9b9b",
+        "accent": "#e5e5e5", "tab": "#facc15",
+        "k": ["#e5e5e5", "#4ade80", "#facc15", "#c084fc", "#f87171", "#67e8f9"],
+        "hero": "linear-gradient(110deg,#171717 0%,#0e0e0e 100%)",
+        "hero_text": "#ffffff", "hero_muted": "#a8a8a8",
+        "input": "#0d0d0d", "btn": "#1c1c1c", "btn_text": "#f5f5f5", "btn_hover": "#2a2a2a",
+        "shadow": "0 6px 18px rgba(0,0,0,.6)", "radius": "10px", "lift": "-1px",
+        "periodo_bg": "#facc15", "periodo_text": "#000000",
+        "logo_bg": "linear-gradient(145deg,#facc15,#d97706)",
+        "chart": ["#e5e5e5", "#facc15", "#4ade80", "#c084fc", "#f87171", "#67e8f9"],
+    },
+    "tradicional": {
+        "nome": "Tradicional", "icone": "🏢",
+        "desc": "Claro e sóbrio, no padrão dos sistemas corporativos clássicos.",
+        "scheme": "light",
+        "bg": "#f2f4f8", "bg_solid": "#f2f4f8", "side": "#ffffff",
+        "surface": "#ffffff", "surface2": "#f6f8fc", "line": "#d7dfeb",
+        "text": "#172033", "muted": "#5d6b82",
+        "accent": "#1d4ed8", "tab": "#17215C",
+        "k": ["#1d4ed8", "#15803d", "#b45309", "#6d28d9", "#b91c1c", "#0e7490"],
+        "hero": "linear-gradient(110deg,#17215C 0%,#1e3a8a 100%)",
+        "hero_text": "#ffffff", "hero_muted": "#c9d6f5",
+        "input": "#ffffff", "btn": "#17215C", "btn_text": "#ffffff", "btn_hover": "#24348a",
+        "shadow": "0 2px 8px rgba(16,24,40,.08)", "radius": "8px", "lift": "0px",
+        "periodo_bg": "#17215C", "periodo_text": "#ffffff",
+        "logo_bg": "linear-gradient(145deg,#FFD400,#E1B700)",
+        "chart": ["#17215C", "#0099DA", "#E1B700", "#1F5F8B", "#D59A00", "#D66D00"],
+    },
+}
+
+# Cores "antigas" dos gráficos -> posição na paleta do tema ativo
+_MAPA_COR_GRAFICO = {"#17215C": 0, "#0099DA": 1, "#E1B700": 2, "#1F5F8B": 3, "#D59A00": 4, "#D66D00": 5}
+
+
+def _carregar_temas_usuarios():
+    try:
+        with open(ARQUIVO_TEMAS_USUARIOS, "r", encoding="utf-8") as f:
+            dados = _json.load(f)
+        return dados if isinstance(dados, dict) else {}
+    except Exception:
+        return {}
+
+
+def _salvar_tema_usuario(usuario, tema):
+    if not usuario:
+        return
+    try:
+        dados = _carregar_temas_usuarios()
+        dados[str(usuario)] = tema
+        os.makedirs(os.path.dirname(ARQUIVO_TEMAS_USUARIOS) or ".", exist_ok=True)
+        with open(ARQUIVO_TEMAS_USUARIOS, "w", encoding="utf-8") as f:
+            _json.dump(dados, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"Não foi possível salvar o tema do usuário: {exc}")
+
+
+if "tema" not in st.session_state or st.session_state.get("tema") not in TEMAS:
+    st.session_state["tema"] = TEMA_PADRAO
+
+
+def _tema_atual():
+    return TEMAS.get(st.session_state.get("tema", TEMA_PADRAO), TEMAS[TEMA_PADRAO])
+
+
+def _tc(cor):
+    """Converte a cor antiga de um gráfico para a paleta do tema ativo."""
+    t = _tema_atual()
+    idx = _MAPA_COR_GRAFICO.get(str(cor).upper())
+    return t["chart"][idx] if idx is not None else cor
+
+
+def _card_bg(fig):
+    """Desenha o fundo arredondado (cartão) atrás de um gráfico matplotlib."""
+    from matplotlib.patches import FancyBboxPatch
+    t = _tema_atual()
+    w, h = fig.get_size_inches()
+    patch = FancyBboxPatch(
+        (0.004, 0.006), 0.992, 0.988,
+        boxstyle="round,pad=0,rounding_size=0.028", mutation_aspect=w / h,
+        transform=fig.transFigure, facecolor=t["surface"], edgecolor=t["line"],
+        linewidth=1.0, zorder=-100,
+    )
+    fig.add_artist(patch)
+
+
+_CSS_TEMA_BASE = """
+.stApp{background:var(--bg-img);color:var(--text);}
+.block-container{max-width:1840px;padding-top:2.6rem;padding-bottom:2rem;}
+header[data-testid="stHeader"]{background:transparent;}
+.stApp p,.stApp label,.stApp li,.stApp span{color:var(--text);}
+.stMarkdown h1,.stMarkdown h2,.stMarkdown h3,.stMarkdown h4{color:var(--text);letter-spacing:-.3px;}
+small,.stCaption,[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{color:var(--muted)!important;}
+a{color:var(--accent)!important;}
+hr{border-color:var(--line)!important;}
+:focus-visible{outline-color:var(--accent)!important;}
+
+/* ---------- Barra lateral ---------- */
+section[data-testid="stSidebar"]{background:var(--side);border-right:1px solid var(--line);}
+section[data-testid="stSidebar"] *{color:var(--text)!important;}
+section[data-testid="stSidebar"] .stSelectbox label,section[data-testid="stSidebar"] .stTextInput label{
+  color:var(--muted)!important;font-size:.76rem!important;font-weight:750!important;letter-spacing:.25px;}
+section[data-testid="stSidebar"] hr{border-color:var(--line)!important;}
+section[data-testid="stSidebar"] .side-user{background:var(--surface2);border:1px solid var(--line);
+  border-radius:12px;padding:10px 12px;margin-bottom:12px;}
+section[data-testid="stSidebar"] .side-user .su-name{font-weight:850;color:var(--tab)!important;}
+section[data-testid="stSidebar"] .side-user .su-line{font-size:12px;color:var(--muted)!important;}
+section[data-testid="stSidebar"] .side-periodo{background:var(--periodo-bg);border-radius:12px;
+  padding:11px 12px;margin:8px 0 14px;box-shadow:var(--shadow);}
+section[data-testid="stSidebar"] .side-periodo *{color:var(--periodo-text)!important;}
+section[data-testid="stSidebar"] .side-periodo .sp-l{font-size:11px;font-weight:850;letter-spacing:.5px;opacity:.85;}
+section[data-testid="stSidebar"] .side-periodo .sp-v{font-size:15px;font-weight:900;}
+
+/* ---------- Cabeçalho (hero) ---------- */
+.hero{background:var(--hero);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px 22px;margin:0 0 6px;box-shadow:var(--shadow);}
+.logo-bar{display:flex;align-items:center;gap:16px;}
+.logo{width:54px;height:54px;flex:0 0 54px;border-radius:calc(var(--radius) - 2px);background:var(--logo-bg);
+  display:flex;align-items:center;justify-content:center;font-size:27px;
+  box-shadow:0 6px 18px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.3);}
+.hero-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.stApp .hero h1{margin:0!important;padding:0!important;font-size:1.55rem;font-weight:850;
+  letter-spacing:-.5px;line-height:1.15;color:var(--hero-text);}
+.stApp .hero .hero-badge{display:inline-flex;align-items:center;gap:6px;font-size:.72rem;font-weight:800;
+  padding:3px 10px;border-radius:999px;color:var(--hero-text);
+  background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);}
+.hero-meta{display:flex;flex-wrap:wrap;gap:6px 20px;margin-top:8px;}
+.stApp .hero .chip{font-size:.78rem;color:var(--hero-muted);}
+.stApp .hero .chip b{color:var(--hero-text);font-weight:800;}
+
+/* ---------- Seletor de tema (ícone) ---------- */
+[data-testid="stPopover"] button{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  color:var(--text)!important;font-weight:750;min-height:44px;box-shadow:var(--shadow);transition:all .15s ease;}
+[data-testid="stPopover"] button *{color:var(--text)!important;}
+[data-testid="stPopover"] button:hover{border-color:var(--accent);transform:translateY(-1px);}
+[data-testid="stPopoverBody"],div[data-baseweb="popover"] > div{background:var(--surface2)!important;
+  border:1px solid var(--line);border-radius:14px;}
+.tema-dots{display:flex;gap:5px;margin:2px 0 8px;}
+.tema-dots i{width:16px;height:16px;border-radius:50%;display:inline-block;border:1px solid rgba(128,128,128,.35);}
+
+/* ---------- Abas (estilo painel corporativo) ---------- */
+.stTabs [data-baseweb="tab-list"]{gap:2px;background:transparent;padding:0;border-bottom:1px solid var(--line);margin-bottom:14px;}
+.stTabs [data-baseweb="tab"]{height:auto;padding:11px 16px;background:transparent;border-radius:0;border:0;color:var(--muted);transition:all .15s ease;}
+.stTabs [data-baseweb="tab"] p{color:inherit!important;font-weight:650;font-size:.92rem;}
+.stTabs [data-baseweb="tab"]:hover{color:var(--text);background:color-mix(in srgb,var(--tab) 8%,transparent);}
+.stTabs [aria-selected="true"]{color:var(--tab)!important;background:transparent!important;box-shadow:none!important;}
+.stTabs [aria-selected="true"] p{color:var(--tab)!important;font-weight:800;}
+.stTabs [data-baseweb="tab-highlight"]{background:var(--tab)!important;height:2px;}
+.stTabs [data-baseweb="tab-border"]{background:var(--line)!important;}
+
+/* ---------- Indicadores (KPI) coloridos ---------- */
+.kpi{--k:var(--k1);position:relative;overflow:hidden;
+  background:color-mix(in srgb,var(--k) 7%,var(--surface));
+  border:1px solid color-mix(in srgb,var(--k) 42%,var(--line));
+  border-radius:var(--radius);padding:14px 16px;min-height:92px;box-shadow:var(--shadow);
+  transition:transform .16s ease,border-color .16s ease;}
+.kpi:hover{transform:translateY(var(--lift));border-color:var(--k);}
+.kpi .label{color:var(--muted);font-size:.7rem;font-weight:800;letter-spacing:.45px;text-transform:uppercase;margin-bottom:8px;}
+.kpi .value{color:var(--k);font-size:1.5rem;font-weight:850;letter-spacing:-.4px;line-height:1.1;}
+[data-testid="stHorizontalBlock"] > div:nth-child(1) .kpi{--k:var(--k1);}
+[data-testid="stHorizontalBlock"] > div:nth-child(2) .kpi{--k:var(--k2);}
+[data-testid="stHorizontalBlock"] > div:nth-child(3) .kpi{--k:var(--k3);}
+[data-testid="stHorizontalBlock"] > div:nth-child(4) .kpi{--k:var(--k4);}
+[data-testid="stHorizontalBlock"] > div:nth-child(5) .kpi{--k:var(--k5);}
+[data-testid="stHorizontalBlock"] > div:nth-child(6) .kpi{--k:var(--k6);}
+
+.dashboard-shell,.dashboard-panel{background:transparent;border:0;padding:0;margin:0;box-shadow:none;}
+div[data-testid="stMetric"]{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px 14px;box-shadow:var(--shadow);}
+div[data-testid="stMetric"] label,div[data-testid="stMetric"] label *{color:var(--muted)!important;}
+div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:var(--text)!important;font-weight:850;}
+div[data-testid="stImage"] img,div[data-testid="stImageContainer"] img{border-radius:var(--radius);}
+
+/* ---------- Campos e botões ---------- */
+.stSelectbox [data-baseweb="select"]>div,.stTextInput input,.stDateInput input,.stNumberInput input,
+.stTextArea textarea,.stMultiSelect [data-baseweb="select"]>div,
+section[data-testid="stSidebar"] [data-baseweb="select"]>div,section[data-testid="stSidebar"] input{
+  background:var(--input)!important;color:var(--text)!important;border:1px solid var(--line)!important;
+  border-radius:10px!important;min-height:40px;}
+.stSelectbox label,.stTextInput label,.stDateInput label,.stNumberInput label,.stTextArea label,.stMultiSelect label{
+  color:var(--muted)!important;font-weight:700!important;}
+ul[role="listbox"],[data-baseweb="menu"]{background:var(--surface2)!important;}
+li[role="option"],li[role="option"] *{color:var(--text)!important;}
+li[role="option"]:hover,li[aria-selected="true"]{background:color-mix(in srgb,var(--accent) 16%,transparent)!important;}
+.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{background:var(--btn);color:var(--btn-text)!important;
+  border:1px solid var(--line);border-radius:10px;font-weight:750;transition:all .15s ease;}
+.stButton>button *,.stDownloadButton>button *,.stFormSubmitButton>button *{color:var(--btn-text)!important;}
+section[data-testid="stSidebar"] .stButton>button,section[data-testid="stSidebar"] .stButton>button *{color:var(--btn-text)!important;}
+.stButton>button:hover,.stDownloadButton>button:hover,.stFormSubmitButton>button:hover{background:var(--btn-hover);
+  border-color:var(--accent);transform:translateY(-1px);}
+.stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);}
+
+/* ---------- Tabelas, alertas, expansores ---------- */
+[data-testid="stDataFrame"],[data-testid="stTable"]{border:1px solid var(--line);border-radius:12px;overflow:hidden;}
+.stAlert,[data-testid="stAlert"]{background:var(--surface);border:1px solid var(--line);border-radius:12px;}
+.stAlert *,[data-testid="stAlert"] *{color:var(--text)!important;}
+[data-testid="stExpander"]{background:var(--surface);border:1px solid var(--line);border-radius:12px;}
+[data-testid="stExpander"] summary,[data-testid="stExpander"] summary *{color:var(--text)!important;font-weight:750;}
+[data-testid="stForm"]{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);}
+
+/* ---------- Tela de login ---------- */
+.login-brand{text-align:center;background:var(--hero);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px;margin:6vh auto 18px;box-shadow:var(--shadow);}
+.stApp .login-brand h1{font-size:1.4rem;color:var(--hero-text);margin:.3rem 0;padding:0;}
+.stApp .login-brand p{color:var(--hero-muted);margin:0;}
+"""
+
+
+def _css_tema(t):
+    k = t["k"]
+    variaveis = (
+        f":root{{color-scheme:{t['scheme']};"
+        f"--bg-img:{t['bg']};--side:{t['side']};--surface:{t['surface']};--surface2:{t['surface2']};"
+        f"--line:{t['line']};--text:{t['text']};--muted:{t['muted']};--accent:{t['accent']};--tab:{t['tab']};"
+        f"--k1:{k[0]};--k2:{k[1]};--k3:{k[2]};--k4:{k[3]};--k5:{k[4]};--k6:{k[5]};"
+        f"--hero:{t['hero']};--hero-text:{t['hero_text']};--hero-muted:{t['hero_muted']};"
+        f"--input:{t['input']};--btn:{t['btn']};--btn-text:{t['btn_text']};--btn-hover:{t['btn_hover']};"
+        f"--shadow:{t['shadow']};--radius:{t['radius']};--lift:{t['lift']};"
+        f"--periodo-bg:{t['periodo_bg']};--periodo-text:{t['periodo_text']};--logo-bg:{t['logo_bg']};}}"
+    )
+    return variaveis + _CSS_TEMA_BASE
+
+
+def injetar_tema():
+    st.markdown(f"<style>{_css_tema(_tema_atual())}</style>", unsafe_allow_html=True)
+
+
+def _on_tema_change():
+    novo = st.session_state.get("tema_radio")
+    if novo in TEMAS:
+        st.session_state["tema"] = novo
+        _salvar_tema_usuario(st.session_state.get("auth_usuario", ""), novo)
+
+
+def seletor_tema():
+    """Ícone de paleta (popover) para o usuário escolher o tema visual."""
+    pop = None
+    if hasattr(st, "popover"):
+        try:
+            pop = st.popover("Tema", icon=":material/palette:", help="Escolher o tema visual")
+        except TypeError:
+            try:
+                pop = st.popover("🎨 Tema")
+            except Exception:
+                pop = None
+    if pop is None:
+        pop = st.expander("🎨 Tema visual")
+    with pop:
+        st.markdown("**Aparência**")
+        st.session_state["tema_radio"] = st.session_state.get("tema", TEMA_PADRAO)
+        st.radio(
+            "Escolha o tema",
+            list(TEMAS.keys()),
+            format_func=lambda c: f"{TEMAS[c]['icone']}  {TEMAS[c]['nome']}",
+            key="tema_radio",
+            on_change=_on_tema_change,
+            label_visibility="collapsed",
+        )
+        t = _tema_atual()
+        pontos = "".join(f"<i style='background:{c}'></i>" for c in [t["surface"]] + t["k"][:4])
+        st.markdown(f"<div class='tema-dots'>{pontos}</div>", unsafe_allow_html=True)
+        st.caption(t["desc"])
+
+
+def render_hero(dt_ini, dt_fim):
+    usuario = _html.escape(str(st.session_state.get("auth_usuario", "")))
+    perfil = "Administrador" if st.session_state.get("auth_perfil") == "admin" else "Consulta"
+    filial_txt = _html.escape(str(st.session_state.get("auth_filial") or "TODAS"))
+    hero = (
+        "<div class='hero'><div class='logo-bar'><div class='logo'>🚚</div><div>"
+        "<div class='hero-title'><h1>Dashboard do Prêmio de Motoristas</h1>"
+        f"<span class='hero-badge'>● Competência {dt_fim.strftime('%m/%Y')}</span></div>"
+        "<div class='hero-meta'>"
+        f"<span class='chip'>📅 Período analisado <b>{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}</b></span>"
+        f"<span class='chip'>🏢 Filial <b>{filial_txt}</b></span>"
+        f"<span class='chip'>👤 <b>{usuario}</b> · {perfil}</span>"
+        "<span class='chip'>Visão gerencial de consumo, desempenho e premiação</span>"
+        "</div></div></div></div>"
+    )
+    try:
+        c_hero, c_tema = st.columns([14, 2], vertical_alignment="center")
+    except TypeError:
+        c_hero, c_tema = st.columns([14, 2])
+    c_hero.markdown(hero, unsafe_allow_html=True)
+    with c_tema:
+        seletor_tema()
+
+
+# ================================================================
 # AUTENTICAÇÃO, PERFIS E RESTRIÇÃO POR FILIAL
 # ================================================================
 AUTH_ADMIN_USER = os.getenv("AUTH_ADMIN_USER", "admin")
@@ -3346,302 +3685,7 @@ if "auth_nome" not in st.session_state: st.session_state.auth_nome = ""
 
 if not st.session_state.auth_ok:
     garantir_usuarios_iniciais()
-    st.markdown("""
-<style>
-/* =========================================================
-   DESIGN SYSTEM — DASHBOARD PREMIUM / DARK FUTURISTA
-   Alterações restritas à camada visual (CSS).
-   ========================================================= */
-:root {
-  --bg: #080f1d;
-  --bg-soft: #0d1728;
-  --surface: #121f33;
-  --surface-2: #17263c;
-  --surface-3: #1b2d45;
-  --line: #2a405b;
-  --line-soft: rgba(111, 155, 196, .16);
-  --text: #edf5ff;
-  --muted: #91a7c2;
-  --cyan: #22d3ee;
-  --blue: #38bdf8;
-  --gold: #facc15;
-  --green: #22c55e;
-  --red: #fb5364;
-  --purple: #a78bfa;
-}
-
-/* Fundo com profundidade e brilho tecnológico discreto */
-.stApp {
-  color: var(--text);
-  background:
-    radial-gradient(ellipse at 12% 0%, rgba(14, 116, 144, .16), transparent 34%),
-    radial-gradient(ellipse at 92% 8%, rgba(37, 99, 235, .13), transparent 30%),
-    linear-gradient(145deg, #080f1d 0%, #0b1424 48%, #0a1220 100%);
-}
-.block-container {
-  max-width: 1840px;
-  padding-top: .85rem;
-  padding-bottom: 2rem;
-}
-header[data-testid="stHeader"] {
-  background: rgba(8, 15, 29, .88);
-  border-bottom: 1px solid rgba(91, 129, 169, .13);
-}
-[data-testid="stToolbar"] { right: 1rem; }
-.stApp p, .stApp label, .stApp span { color: var(--text); }
-
-/* Barra lateral */
-section[data-testid="stSidebar"] {
-  background: linear-gradient(180deg, #0b1628 0%, #0d1b30 52%, #091322 100%);
-  border-right: 1px solid #243a54;
-  box-shadow: 8px 0 34px rgba(0, 0, 0, .24);
-}
-section[data-testid="stSidebar"] * { color: #e7f1ff !important; }
-section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
-section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
-  color: #f4f8ff !important;
-  letter-spacing: -.2px;
-}
-section[data-testid="stSidebar"] .stSelectbox label,
-section[data-testid="stSidebar"] .stTextInput label {
-  color: #a9bfd8 !important;
-  font-size: .78rem !important;
-  font-weight: 750 !important;
-  letter-spacing: .25px;
-}
-section[data-testid="stSidebar"] [data-baseweb="select"] > div,
-section[data-testid="stSidebar"] input {
-  background: #14243a !important;
-  color: #f4f8ff !important;
-  border: 1px solid #35516f !important;
-  border-radius: 10px !important;
-  min-height: 40px;
-}
-section[data-testid="stSidebar"] [data-baseweb="select"] span,
-section[data-testid="stSidebar"] [data-baseweb="select"] input {
-  color: #f4f8ff !important;
-}
-section[data-testid="stSidebar"] hr { border-color: #263d58 !important; }
-
-/* Cabeçalho principal */
-.hero {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 88% 15%, rgba(34, 211, 238, .18), transparent 27%),
-    linear-gradient(112deg, #142944 0%, #172a43 48%, #142d3b 100%);
-  border: 1px solid rgba(82, 151, 190, .42);
-  border-radius: 18px;
-  padding: 20px 25px;
-  margin: 4px 0 18px;
-  box-shadow: 0 12px 34px rgba(0, 0, 0, .25), inset 0 1px 0 rgba(255,255,255,.045);
-}
-.hero:after {
-  content: "";
-  position: absolute;
-  width: 260px;
-  height: 260px;
-  right: -90px;
-  top: -150px;
-  border: 1px solid rgba(34, 211, 238, .15);
-  border-radius: 50%;
-  box-shadow: 0 0 0 22px rgba(34,211,238,.025), 0 0 0 46px rgba(34,211,238,.018);
-  pointer-events: none;
-}
-.hero h1 {
-  margin: 0;
-  color: #f7fbff;
-  font-size: 1.78rem;
-  font-weight: 900;
-  letter-spacing: -.75px;
-}
-.hero p {
-  margin: .32rem 0 0;
-  color: #a8c0d9;
-  font-size: .88rem;
-}
-.logo-bar { display: flex; align-items: center; gap: 16px; position: relative; z-index: 1; }
-.logo {
-  width: 58px;
-  height: 58px;
-  flex: 0 0 58px;
-  border-radius: 17px;
-  background: linear-gradient(145deg, #facc15 0%, #f59e0b 55%, #b77905 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-  border: 1px solid rgba(255,255,255,.28);
-  box-shadow: 0 0 0 4px rgba(250,204,21,.08), 0 8px 22px rgba(0,0,0,.32);
-}
-
-/* Indicadores */
-.kpi {
-  position: relative;
-  overflow: hidden;
-  background: linear-gradient(145deg, #17283f 0%, #122137 100%);
-  border: 1px solid #2b4562;
-  border-radius: 15px;
-  padding: 14px 16px;
-  box-shadow: 0 7px 22px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035);
-  min-height: 86px;
-  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
-}
-.kpi:before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: linear-gradient(180deg, var(--cyan), #2563eb);
-  opacity: .9;
-}
-.kpi:hover {
-  transform: translateY(-2px);
-  border-color: rgba(34,211,238,.55);
-  box-shadow: 0 10px 26px rgba(0,0,0,.24), 0 0 18px rgba(34,211,238,.06);
-}
-.kpi .label {
-  color: #9db2cb;
-  font-size: .74rem;
-  margin-bottom: 6px;
-  font-weight: 750;
-  letter-spacing: .35px;
-  text-transform: uppercase;
-}
-.kpi .value {
-  color: #f5f9ff;
-  font-size: 1.42rem;
-  font-weight: 900;
-  letter-spacing: -.45px;
-}
-
-/* Painéis e cartões de conteúdo */
-.dashboard-shell {
-  background: linear-gradient(145deg, rgba(20,35,56,.96), rgba(15,29,48,.96));
-  border: 1px solid #2b425e;
-  border-radius: 18px;
-  padding: 16px 17px 12px;
-  box-shadow: 0 12px 30px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.025);
-}
-.dashboard-panel {
-  background: linear-gradient(155deg, #172941 0%, #132238 100%);
-  border: 1px solid #2a425e;
-  border-radius: 14px;
-  padding: 7px 9px 4px;
-  margin: 6px 0 13px;
-  box-shadow: 0 6px 18px rgba(0,0,0,.14);
-}
-.stMetric, div[data-testid="stMetric"] {
-  background: linear-gradient(145deg, #172941, #132238);
-  border: 1px solid #2b4562;
-  border-radius: 13px;
-  padding: 12px 14px;
-  box-shadow: 0 5px 16px rgba(0,0,0,.12);
-}
-div[data-testid="stMetric"] label { color: #9db2cb !important; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-  color: #f5f9ff !important;
-  font-weight: 850;
-}
-div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-weight: 700; }
-
-/* Abas: navegação limpa, estilo painel de controle */
-.stTabs [data-baseweb="tab-list"] {
-  gap: 6px;
-  background: rgba(13, 25, 42, .72);
-  padding: 5px 6px;
-  border: 1px solid #263d58;
-  border-radius: 13px;
-  margin-bottom: 10px;
-}
-.stTabs [data-baseweb="tab"] {
-  border-radius: 9px;
-  padding: 9px 13px;
-  background: transparent;
-  color: #9fb4cc;
-  border: 1px solid transparent;
-  font-weight: 750;
-  transition: all .16s ease;
-}
-.stTabs [data-baseweb="tab"]:hover {
-  background: rgba(56,189,248,.08);
-  color: #eaf8ff;
-  border-color: rgba(56,189,248,.18);
-}
-.stTabs [aria-selected="true"] {
-  background: linear-gradient(135deg, #173b56, #16445a) !important;
-  color: #facc15 !important;
-  border: 1px solid rgba(34,211,238,.42) !important;
-  box-shadow: inset 0 -2px 0 #22d3ee, 0 4px 14px rgba(0,0,0,.16);
-}
-
-/* Campos de entrada e botões */
-.stSelectbox [data-baseweb="select"] > div,
-.stTextInput input, .stDateInput input, .stNumberInput input,
-.stTextArea textarea, .stMultiSelect [data-baseweb="select"] > div {
-  background: #14243a !important;
-  color: #f1f7ff !important;
-  border: 1px solid #385471 !important;
-  border-radius: 10px !important;
-}
-.stSelectbox label, .stTextInput label, .stDateInput label,
-.stNumberInput label, .stTextArea label, .stMultiSelect label {
-  color: #b2c5da !important;
-  font-weight: 700 !important;
-}
-.stButton > button, .stDownloadButton > button {
-  background: linear-gradient(135deg, #1d3855, #203e5b);
-  color: #f5f9ff !important;
-  border: 1px solid #45627f;
-  border-radius: 10px;
-  font-weight: 800;
-  transition: all .16s ease;
-  box-shadow: 0 4px 12px rgba(0,0,0,.13);
-}
-.stButton > button:hover, .stDownloadButton > button:hover {
-  background: linear-gradient(135deg, #174c68, #1c5b70);
-  color: #fff !important;
-  border-color: #22d3ee;
-  box-shadow: 0 0 0 2px rgba(34,211,238,.09), 0 7px 18px rgba(0,0,0,.2);
-  transform: translateY(-1px);
-}
-.stButton > button:focus, .stDownloadButton > button:focus {
-  border-color: var(--gold) !important;
-  box-shadow: 0 0 0 2px rgba(250,204,21,.16) !important;
-}
-
-/* Tabelas, mensagens, expansores e divisórias */
-[data-testid="stDataFrame"], [data-testid="stTable"] {
-  border: 1px solid #2d4561;
-  border-radius: 12px;
-  overflow: hidden;
-}
-[data-testid="stDataFrame"] [role="grid"] { background: #122137; }
-hr { border-color: #2b425e !important; }
-.stAlert {
-  background: #172941;
-  border: 1px solid #3b5876;
-  color: #e7f1ff;
-  border-radius: 12px;
-}
-[data-testid="stExpander"] {
-  background: rgba(20,36,58,.8);
-  border: 1px solid #2d4561;
-  border-radius: 12px;
-}
-[data-testid="stExpander"] summary { color: #eaf3ff !important; font-weight: 750; }
-small, .stCaption, [data-testid="stCaptionContainer"] {
-  color: #91a7c2 !important;
-}
-.stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-  color: #f0f6ff;
-  letter-spacing: -.35px;
-}
-.stMarkdown h3 { font-weight: 850; }
-a { color: #67d8f5 !important; }
-:focus-visible { outline-color: #22d3ee !important; }
-</style>
-""", unsafe_allow_html=True)
+    injetar_tema()
     st.markdown("<div class='login-shell'><div class='login-brand'><div style='font-size:34px;'>🚚</div><h1>Dashboard do Prêmio de Motoristas</h1><p>Acesso protegido por login</p></div>", unsafe_allow_html=True)
     usuario_login = st.text_input("👤 Usuário", placeholder="Digite seu usuário")
     senha_login = st.text_input("🔒 Senha", type="password", placeholder="Digite sua senha")
@@ -3653,6 +3697,8 @@ a { color: #67d8f5 !important; }
             st.session_state.auth_perfil = autenticado["perfil"]
             st.session_state.auth_filial = autenticado["filial"] or "TODAS"
             st.session_state.auth_nome = autenticado["nome"]
+            st.session_state.tema = _carregar_temas_usuarios().get(autenticado["usuario"], st.session_state.get("tema", TEMA_PADRAO))
+            if st.session_state.tema not in TEMAS: st.session_state.tema = TEMA_PADRAO
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos.")
@@ -3664,98 +3710,7 @@ FILIAL_ACESSO = DataUtils.normalizar_texto(st.session_state.auth_filial or "TODA
 
 is_admin = st.session_state.auth_perfil == "admin"
 
-st.markdown("""
-<style>
-:root{
- --navy:#0f172a;--panel:#1e293b;--panel2:#172337;--blue:#38bdf8;
- --gold:#facc15;--bg:#0b1220;--muted:#94a3b8;--line:#334155;
- --text:#e5edf7;--green:#22c55e;--red:#ef4444;
-}
-.stApp{background:#0b1220;color:var(--text);}
-.block-container{max-width:1780px;padding-top:1.0rem;padding-bottom:1.5rem;}
-header[data-testid="stHeader"]{background:rgba(11,18,32,.96);}
-[data-testid="stToolbar"]{right:1rem;}
-.stApp, .stApp p, .stApp label, .stApp span{color:var(--text);}
-section[data-testid="stSidebar"]{
- background:linear-gradient(180deg,#0b1425 0%,#111d31 100%);
- border-right:1px solid #26364d;
-}
-section[data-testid="stSidebar"] *{color:#e5edf7!important;}
-section[data-testid="stSidebar"] .stSelectbox label,
-section[data-testid="stSidebar"] .stTextInput label{font-weight:750!important;color:#cbd5e1!important;}
-section[data-testid="stSidebar"] [data-baseweb="select"]>div,
-section[data-testid="stSidebar"] input{
- background:#1e293b!important;color:#f8fafc!important;
- border:1px solid #475569!important;border-radius:9px!important;
-}
-section[data-testid="stSidebar"] [data-baseweb="select"] span,
-section[data-testid="stSidebar"] [data-baseweb="select"] input{color:#f8fafc!important;}
-.hero{
- background:linear-gradient(110deg,#1d3556 0%,#1e293b 68%,#303b3c 100%);
- border:1px solid #334155;border-radius:15px;padding:17px 22px;
- margin:4px 0 18px;box-shadow:0 8px 24px rgba(0,0,0,.22);color:#fff;
-}
-.hero h1{margin:0;color:#f8fafc;font-size:1.7rem;font-weight:850;letter-spacing:-.4px}
-.hero p{margin:.3rem 0 0;color:#9fb3ca;font-size:.88rem}
-.logo-bar{display:flex;align-items:center;gap:14px}
-.logo{
- width:54px;height:54px;border-radius:15px;
- background:linear-gradient(145deg,#facc15,#d97706);
- display:flex;align-items:center;justify-content:center;font-size:27px;
- box-shadow:0 0 0 3px rgba(250,204,21,.12),0 5px 15px rgba(0,0,0,.3)
-}
-.kpi{
- background:#1e293b;border:1px solid #334155;border-radius:13px;
- padding:13px 15px;box-shadow:0 5px 16px rgba(0,0,0,.14);min-height:83px;
-}
-.kpi .label{color:#9fb0c5;font-size:.75rem;margin-bottom:6px;font-weight:650}
-.kpi .value{color:#f8fafc;font-size:1.35rem;font-weight:850}
-.dashboard-shell{
- background:#1e293b;border:1px solid #334155;border-radius:16px;
- padding:15px 16px 10px;box-shadow:0 8px 24px rgba(0,0,0,.15)
-}
-.dashboard-panel{
- background:#172337;border:1px solid #334155;border-radius:12px;
- padding:5px 8px 2px;margin:5px 0 12px;box-shadow:0 4px 12px rgba(0,0,0,.10)
-}
-.stTabs [data-baseweb="tab-list"]{
- gap:5px;background:transparent;padding:3px 0 9px;border-bottom:1px solid #334155
-}
-.stTabs [data-baseweb="tab"]{
- border-radius:9px 9px 0 0;padding:9px 13px;background:transparent;
- color:#9fb0c5;border:1px solid transparent;font-weight:700
-}
-.stTabs [aria-selected="true"]{
- background:#1e293b!important;color:#facc15!important;
- border:1px solid #334155!important;border-bottom:2px solid #facc15!important
-}
-div[data-testid="stMetric"]{
- background:#1e293b;border:1px solid #334155;border-radius:12px;padding:12px 14px
-}
-div[data-testid="stMetric"] label{color:#9fb0c5!important}
-div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:#f8fafc!important}
-.stSelectbox [data-baseweb="select"]>div,.stTextInput input,.stDateInput input,
-.stNumberInput input,.stTextArea textarea{
- background:#172337!important;color:#f1f5f9!important;border:1px solid #475569!important;
- border-radius:9px!important
-}
-.stSelectbox label,.stTextInput label,.stDateInput label,.stNumberInput label,
-.stTextArea label{color:#cbd5e1!important;font-weight:650!important}
-.stButton>button{
- background:#26364d;color:#f8fafc;border:1px solid #475569;border-radius:9px;
- font-weight:700;transition:all .15s ease
-}
-.stButton>button:hover{background:#334a67;color:#fff;border-color:#facc15}
-.stDownloadButton>button{background:#26364d;color:#f8fafc;border:1px solid #475569}
-[data-testid="stDataFrame"],[data-testid="stTable"]{
- border:1px solid #334155;border-radius:10px;overflow:hidden
-}
-hr{border-color:#334155!important}
-.stAlert{background:#172337;border:1px solid #475569;color:#e5edf7}
-[data-testid="stExpander"]{background:#172337;border:1px solid #334155;border-radius:10px}
-small,.stCaption{color:#94a3b8!important}
-</style>
-""", unsafe_allow_html=True)
+injetar_tema()
 
 def _mtime_arquivo(nome):
     try:
@@ -3973,16 +3928,15 @@ mots_lista = ["TODOS"] + sorted(mots_cad_iniciais["MOTORISTA_CADASTRO"].dropna()
 cats_lista = ["TODAS"] + sorted(res_initial["CATEGORIA"].dropna().unique().tolist())
 filiais_lista = ([FILIAL_ACESSO] if (not is_admin and FILIAL_ACESSO not in ("", "TODAS")) else ["TODAS"] + sorted([str(x) for x in cadastro["BASE_CADASTRO"].dropna().unique() if str(x).strip()]) )
 
-st.markdown('''<div class="hero"><div class="logo-bar"><div class="logo">🚚</div><div><h1>Dashboard do Prêmio de Motoristas</h1><p>Visão gerencial de consumo, desempenho e premiação</p></div></div></div>''', unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("## 🔐 Acesso")
     perfil_label = "Administrador" if is_admin else "Consulta"
     st.markdown(
-        f"<div style='background:#0E1A46;border:1px solid #2A3B73;border-radius:10px;padding:10px;margin-bottom:12px;'>"
-        f"<div style='font-weight:900;color:#FFD400;'>👤 {st.session_state.auth_usuario}</div>"
-        f"<div style='font-size:12px;color:#D7E7FF;'>Perfil: {perfil_label}</div>"
-        f"<div style='font-size:12px;color:#D7E7FF;'>Filial: {FILIAL_ACESSO if FILIAL_ACESSO else 'TODAS'}</div></div>",
+        f"<div class='side-user'>"
+        f"<div class='su-name'>👤 {_html.escape(str(st.session_state.auth_usuario))}</div>"
+        f"<div class='su-line'>Perfil: {perfil_label}</div>"
+        f"<div class='su-line'>Filial: {FILIAL_ACESSO if FILIAL_ACESSO else 'TODAS'}</div></div>",
         unsafe_allow_html=True,
     )
     if st.button("🚪 Sair", key="btn_logout", use_container_width=True):
@@ -4004,9 +3958,9 @@ with st.sidebar:
     st.session_state.mapa_cat_custom = categorias_ativas_na_competencia(st.session_state.categorias_vigencia, dt_ini, dt_fim)
 
     st.markdown(
-        f"<div style='background:#FFD400;border:2px solid #E0AE00;border-radius:10px;padding:11px 12px;margin:8px 0 14px 0;box-shadow:0 6px 16px rgba(0,0,0,.20);'>"
-        f"<div style='font-size:12px;color:#000000;font-weight:900;'>PERÍODO SELECIONADO</div>"
-        f"<div style='font-size:15px;color:#000000;font-weight:900;'>{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}</div>"
+        f"<div class='side-periodo'>"
+        f"<div class='sp-l'>PERÍODO SELECIONADO</div>"
+        f"<div class='sp-v'>{dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')}</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -4016,6 +3970,8 @@ with st.sidebar:
     cat = st.selectbox("Categoria", cats_lista)
     filial = st.selectbox("Filial / Base", filiais_lista, disabled=(not is_admin))
     if st.button("🔄 Limpar filtros", use_container_width=True): st.rerun()
+
+render_hero(dt_ini, dt_fim)
 
 current = aplicar_filtros_st(dt_ini, dt_fim, mot, placa, cat, filial)
 (f_premio, f_gasto, f_km, f_litros, f_media, f_mots, res_view, rh_view, det_view, df_multi, mots_multi, res_f) = current
@@ -4031,7 +3987,6 @@ if is_admin:
 tabs=st.tabs(tab_labels)
 BACKUP_TAB_INDEX = len(tab_labels) - 1 if is_admin else None
 with tabs[0]:
-    st.markdown('<div class="dashboard-shell">', unsafe_allow_html=True)
     st.markdown("### 📈 Visão Gerencial da Competência")
     st.caption(f"Período: {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')} | Todos os gráficos acompanham os filtros da lateral.")
 
@@ -4063,54 +4018,53 @@ with tabs[0]:
 
         def _hbar(df,title,fmt,color,height=2.2,maxn=7):
             d=df.head(maxn).copy(); d["VALOR"]=pd.to_numeric(d["VALOR"],errors="coerce").fillna(0); d=d.sort_values("VALOR")
-            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("#F9FCFD")
-            bars=ax.barh(d.index.astype(str),d["VALOR"],color=color,height=.52)
+            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("none"); _card_bg(fig)
+            bars=ax.barh(d.index.astype(str),d["VALOR"],color=_tc(color),height=.52)
             for s in ax.spines.values(): s.set_visible(False)
-            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors='#536578'); ax.set_xlabel(''); ax.set_ylabel('')
+            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors=_tema_atual()["muted"]); ax.set_xlabel(''); ax.set_ylabel('')
             mx=max(float(d["VALOR"].max()),1); ax.set_xlim(0,mx*1.22)
-            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_width()+mx*.014,b.get_y()+b.get_height()/2,fmt(v),va='center',fontsize=7.8,color='#17215C',fontweight='bold')
-            ax.set_title(title,loc='left',fontsize=10,color='#17215C',fontweight='bold',pad=6); fig.tight_layout(pad=.35); return fig
+            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_width()+mx*.014,b.get_y()+b.get_height()/2,fmt(v),va='center',fontsize=7.8,color=_tema_atual()["text"],fontweight='bold')
+            ax.set_title(title,loc='left',fontsize=10,color=_tema_atual()["text"],fontweight='bold',pad=6); fig.tight_layout(pad=.9); return fig
 
         def _vbar(df,title,fmt,color,height=2.2):
             d=df.copy(); d["VALOR"]=pd.to_numeric(d["VALOR"],errors="coerce").fillna(0)
-            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("#F9FCFD")
-            bars=ax.bar(d.index.astype(str),d["VALOR"],color=color,width=.55)
+            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("none"); _card_bg(fig)
+            bars=ax.bar(d.index.astype(str),d["VALOR"],color=_tc(color),width=.55)
             for s in ax.spines.values(): s.set_visible(False)
-            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors='#536578'); ax.tick_params(axis='x',rotation=15); ax.set_ylabel(''); ax.set_xlabel('')
+            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors=_tema_atual()["muted"]); ax.tick_params(axis='x',rotation=15); ax.set_ylabel(''); ax.set_xlabel('')
             mx=max(float(d["VALOR"].max()),1); ax.set_ylim(0,mx*1.22)
-            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_x()+b.get_width()/2,b.get_height()+mx*.022,fmt(v),ha='center',va='bottom',fontsize=7.6,color='#17215C',fontweight='bold')
-            ax.set_title(title,loc='left',fontsize=10,color='#17215C',fontweight='bold',pad=6); fig.tight_layout(pad=.35); return fig
+            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_x()+b.get_width()/2,b.get_height()+mx*.022,fmt(v),ha='center',va='bottom',fontsize=7.6,color=_tema_atual()["text"],fontweight='bold')
+            ax.set_title(title,loc='left',fontsize=10,color=_tema_atual()["text"],fontweight='bold',pad=6); fig.tight_layout(pad=.9); return fig
 
         c1,c2=st.columns(2)
         with c1:
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_hbar(premio_cat,"💰 Prêmio por Categoria",_brl,"#17215C"),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_hbar(premio_cat,"💰 Prêmio por Categoria",_brl,"#17215C"),use_container_width=True)
         with c2:
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_hbar(premio_filial,"🏢 Prêmio por Filial",_brl,"#0099DA"),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_hbar(premio_filial,"🏢 Prêmio por Filial",_brl,"#0099DA"),use_container_width=True)
 
         c3,c4=st.columns(2)
         km_df=consumo_cat[["KM_TOTAL"]].rename(columns={"KM_TOTAL":"VALOR"}); lit_df=consumo_cat[["LITROS_TOTAL"]].rename(columns={"LITROS_TOTAL":"VALOR"})
         with c3:
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(km_df,"📍 KM por Categoria",_km,"#0099DA"),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_vbar(km_df,"📍 KM por Categoria",_km,"#0099DA"),use_container_width=True)
         with c4:
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(lit_df,"🧪 Litros por Categoria",_lit,"#E1B700"),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_vbar(lit_df,"🧪 Litros por Categoria",_lit,"#E1B700"),use_container_width=True)
 
         c5,c6=st.columns(2)
         with c5:
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_hbar(top_mots,"🏅 Top 7 Motoristas por Prêmio",_brl,"#1F5F8B",2.25,7),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_hbar(top_mots,"🏅 Top 7 Motoristas por Prêmio",_brl,"#1F5F8B",2.25,7),use_container_width=True)
         with c6:
             des=[]
             if "DESCONTO_EXCESSO_VELOCIDADE" in res_f.columns: des.append(("Velocidade",float(pd.to_numeric(res_f["DESCONTO_EXCESSO_VELOCIDADE"],errors="coerce").fillna(0).sum())))
             if "DESCONTO_CONTROLE_JORNADA" in res_f.columns: des.append(("Jornada",float(pd.to_numeric(res_f["DESCONTO_CONTROLE_JORNADA"],errors="coerce").fillna(0).sum())))
             dfd=pd.DataFrame(des,columns=["TIPO","VALOR"]).set_index("TIPO") if des else pd.DataFrame({"VALOR":[0]},index=["Sem descontos"])
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(dfd,"📉 Descontos por Pilar",_brl,"#D59A00"),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_vbar(dfd,"📉 Descontos por Pilar",_brl,"#D59A00"),use_container_width=True)
 
         ev=[]
         if "EVENTOS_EXCESSO_VELOCIDADE" in res_f.columns: ev.append(("Velocidade",float(pd.to_numeric(res_f["EVENTOS_EXCESSO_VELOCIDADE"],errors="coerce").fillna(0).sum())))
         if "EVENTOS_CONTROLE_JORNADA" in res_f.columns: ev.append(("Jornada",float(pd.to_numeric(res_f["EVENTOS_CONTROLE_JORNADA"],errors="coerce").fillna(0).sum())))
         if ev:
             evdf=pd.DataFrame(ev,columns=["TIPO","VALOR"]).set_index("TIPO")
-            st.markdown('<div class="dashboard-panel">',unsafe_allow_html=True); st.pyplot(_vbar(evdf,"⚠️ Eventos dos Pilares",_int,"#D66D00",2.0),use_container_width=True); st.markdown('</div>',unsafe_allow_html=True)
-    st.markdown('</div>',unsafe_allow_html=True)
+            st.pyplot(_vbar(evdf,"⚠️ Eventos dos Pilares",_int,"#D66D00",2.0),use_container_width=True)
 with tabs[1]:
     st.subheader("📊 Resumo de Abastecimentos")
     st.caption(
