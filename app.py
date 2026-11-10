@@ -3377,21 +3377,94 @@ is_admin = st.session_state.auth_perfil == "admin"
 
 st.markdown("""
 <style>
-:root{--navy:#17215C;--blue:#0099DA;--gold:#F4C400;--bg:#E5EFF5;--muted:#5D7083;--line:#CBDCE5;}
-.stApp{background:linear-gradient(135deg,#E6F0F5 0%,#D8E8F0 55%,#EEF5F8 100%);}
-.block-container{max-width:1580px;padding-top:.7rem;padding-bottom:1.2rem;}
-section[data-testid="stSidebar"]{background:linear-gradient(180deg,#071033 0%,#0A1740 50%,#051126 100%);border-right:1px solid #1B2B5B;box-shadow:8px 0 24px rgba(5,17,38,.18);}
-section[data-testid="stSidebar"] *{color:#F6FBFF!important;}
-section[data-testid="stSidebar"] .stSelectbox label,section[data-testid="stSidebar"] .stTextInput label{color:#FFFFFF!important;font-weight:800!important;}
-section[data-testid="stSidebar"] [data-baseweb="select"]>div{background:#F8FBFF!important;color:#111827!important;border:1px solid #CBD5E1!important;border-radius:10px!important;}
-section[data-testid="stSidebar"] [data-baseweb="select"] span,section[data-testid="stSidebar"] [data-baseweb="select"] input{color:#111827!important;}
-section[data-testid="stSidebar"] input{background:#F8FBFF!important;color:#111827!important;border-radius:10px!important;border:1px solid #CBD5E1!important;}
-.hero{background:linear-gradient(135deg,#17215C 0%,#20438D 55%,#0099DA 100%);border-radius:22px;padding:18px 24px;margin-bottom:12px;box-shadow:0 11px 30px rgba(23,33,92,.18);color:#fff;}
-.hero h1{margin:0;color:#fff;font-size:1.85rem;font-weight:800}.hero p{margin:.25rem 0 0;color:#E3F6FF;font-size:.88rem}.logo-bar{display:flex;align-items:center;gap:14px}.logo{width:56px;height:56px;border-radius:15px;background:linear-gradient(180deg,#0099DA 0 33%,#FFD700 33% 66%,#17215C 66%);display:flex;align-items:center;justify-content:center;font-size:27px;box-shadow:0 5px 15px rgba(0,0,0,.18)}
-.kpi{background:rgba(255,255,255,.94);border:1px solid #D1E0E8;border-radius:16px;padding:12px 14px;box-shadow:0 6px 18px rgba(23,33,92,.07);min-height:80px}.kpi .label{color:#657487;font-size:.73rem;margin-bottom:4px}.kpi .value{color:#17215C;font-size:1.38rem;font-weight:850}
-.dashboard-shell{background:rgba(248,252,254,.72);border:1px solid #C7D8E1;border-radius:20px;padding:13px 14px 8px;box-shadow:0 8px 24px rgba(23,33,92,.06)}
-.dashboard-panel{background:linear-gradient(180deg,#F9FCFD 0%,#EEF6F9 100%);border:1px solid #D3E1E7;border-radius:14px;padding:2px 6px 0;margin:4px 0 10px;box-shadow:0 4px 11px rgba(23,33,92,.035)}
-.stTabs [data-baseweb="tab-list"]{gap:7px;background:transparent;padding:2px 0 6px}.stTabs [data-baseweb="tab"]{border-radius:10px;padding:7px 11px;background:#DDEAF1;color:#20305F;border:1px solid #CBDDE5}.stTabs [aria-selected="true"]{background:#17215C!important;color:#fff!important;border-color:#17215C!important}
+:root{
+ --navy:#0f172a;--panel:#1e293b;--panel2:#172337;--blue:#38bdf8;
+ --gold:#facc15;--bg:#0b1220;--muted:#94a3b8;--line:#334155;
+ --text:#e5edf7;--green:#22c55e;--red:#ef4444;
+}
+.stApp{background:#0b1220;color:var(--text);}
+.block-container{max-width:1780px;padding-top:1.0rem;padding-bottom:1.5rem;}
+header[data-testid="stHeader"]{background:rgba(11,18,32,.96);}
+[data-testid="stToolbar"]{right:1rem;}
+.stApp, .stApp p, .stApp label, .stApp span{color:var(--text);}
+section[data-testid="stSidebar"]{
+ background:linear-gradient(180deg,#0b1425 0%,#111d31 100%);
+ border-right:1px solid #26364d;
+}
+section[data-testid="stSidebar"] *{color:#e5edf7!important;}
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stTextInput label{font-weight:750!important;color:#cbd5e1!important;}
+section[data-testid="stSidebar"] [data-baseweb="select"]>div,
+section[data-testid="stSidebar"] input{
+ background:#1e293b!important;color:#f8fafc!important;
+ border:1px solid #475569!important;border-radius:9px!important;
+}
+section[data-testid="stSidebar"] [data-baseweb="select"] span,
+section[data-testid="stSidebar"] [data-baseweb="select"] input{color:#f8fafc!important;}
+.hero{
+ background:linear-gradient(110deg,#1d3556 0%,#1e293b 68%,#303b3c 100%);
+ border:1px solid #334155;border-radius:15px;padding:17px 22px;
+ margin:4px 0 18px;box-shadow:0 8px 24px rgba(0,0,0,.22);color:#fff;
+}
+.hero h1{margin:0;color:#f8fafc;font-size:1.7rem;font-weight:850;letter-spacing:-.4px}
+.hero p{margin:.3rem 0 0;color:#9fb3ca;font-size:.88rem}
+.logo-bar{display:flex;align-items:center;gap:14px}
+.logo{
+ width:54px;height:54px;border-radius:15px;
+ background:linear-gradient(145deg,#facc15,#d97706);
+ display:flex;align-items:center;justify-content:center;font-size:27px;
+ box-shadow:0 0 0 3px rgba(250,204,21,.12),0 5px 15px rgba(0,0,0,.3)
+}
+.kpi{
+ background:#1e293b;border:1px solid #334155;border-radius:13px;
+ padding:13px 15px;box-shadow:0 5px 16px rgba(0,0,0,.14);min-height:83px;
+}
+.kpi .label{color:#9fb0c5;font-size:.75rem;margin-bottom:6px;font-weight:650}
+.kpi .value{color:#f8fafc;font-size:1.35rem;font-weight:850}
+.dashboard-shell{
+ background:#1e293b;border:1px solid #334155;border-radius:16px;
+ padding:15px 16px 10px;box-shadow:0 8px 24px rgba(0,0,0,.15)
+}
+.dashboard-panel{
+ background:#172337;border:1px solid #334155;border-radius:12px;
+ padding:5px 8px 2px;margin:5px 0 12px;box-shadow:0 4px 12px rgba(0,0,0,.10)
+}
+.stTabs [data-baseweb="tab-list"]{
+ gap:5px;background:transparent;padding:3px 0 9px;border-bottom:1px solid #334155
+}
+.stTabs [data-baseweb="tab"]{
+ border-radius:9px 9px 0 0;padding:9px 13px;background:transparent;
+ color:#9fb0c5;border:1px solid transparent;font-weight:700
+}
+.stTabs [aria-selected="true"]{
+ background:#1e293b!important;color:#facc15!important;
+ border:1px solid #334155!important;border-bottom:2px solid #facc15!important
+}
+div[data-testid="stMetric"]{
+ background:#1e293b;border:1px solid #334155;border-radius:12px;padding:12px 14px
+}
+div[data-testid="stMetric"] label{color:#9fb0c5!important}
+div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:#f8fafc!important}
+.stSelectbox [data-baseweb="select"]>div,.stTextInput input,.stDateInput input,
+.stNumberInput input,.stTextArea textarea{
+ background:#172337!important;color:#f1f5f9!important;border:1px solid #475569!important;
+ border-radius:9px!important
+}
+.stSelectbox label,.stTextInput label,.stDateInput label,.stNumberInput label,
+.stTextArea label{color:#cbd5e1!important;font-weight:650!important}
+.stButton>button{
+ background:#26364d;color:#f8fafc;border:1px solid #475569;border-radius:9px;
+ font-weight:700;transition:all .15s ease
+}
+.stButton>button:hover{background:#334a67;color:#fff;border-color:#facc15}
+.stDownloadButton>button{background:#26364d;color:#f8fafc;border:1px solid #475569}
+[data-testid="stDataFrame"],[data-testid="stTable"]{
+ border:1px solid #334155;border-radius:10px;overflow:hidden
+}
+hr{border-color:#334155!important}
+.stAlert{background:#172337;border:1px solid #475569;color:#e5edf7}
+[data-testid="stExpander"]{background:#172337;border:1px solid #334155;border-radius:10px}
+small,.stCaption{color:#94a3b8!important}
 </style>
 """, unsafe_allow_html=True)
 
