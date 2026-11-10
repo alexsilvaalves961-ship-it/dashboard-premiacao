@@ -3192,8 +3192,7 @@ def gerar_html_unico_recibo(
             <tr style="border-bottom: 1px solid #000000;">
                 <td style="background-color: #D0E0F0; padding: 4px 8px; border-right: 1px solid #000000; text-align: center;">OUTROS CONTROLES</td>
                 <td style="padding: 4px 8px; text-align: center;">0</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #000000;">
-            </table>
+           </tr>
+        </table>
     </div>
     """
