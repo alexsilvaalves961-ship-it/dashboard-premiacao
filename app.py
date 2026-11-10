@@ -22,7 +22,13 @@ import matplotlib.pyplot as plt
 # ================================================================
 # CONFIGURAÇÃO DE CAMINHOS E PERSISTÊNCIA (LOCAL / RAILWAY)
 # ================================================================
-DATA_DIR = os.getenv("DATA_DIR", ".")
+DATA_DIR = os.getenv("DATA_DIR") or ""
+if not DATA_DIR:
+  try:
+    DATA_DIR = str(st.secrets.get("DATA_DIR", "") or "")
+  except Exception:
+    DATA_DIR = ""
+DATA_DIR = DATA_DIR.strip() or "."
 
 # Arquivos mensais de viagens: exemplo "viagens 08_2026.xlsx".
 # O aplicativo procura automaticamente todos os arquivos nesse padrão no mesmo diretório
@@ -735,8 +741,16 @@ def _estado_remoto():
     return {"ultimo_ok": None, "erro": None, "ultimo_snapshot": 0.0, "config_erro": None}
 
 
+_NOMES_CFG_REMOTO = ["BACKUP_REMOTE", "S3_BUCKET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
+                     "S3_REGION", "BACKUP_REMOTE_DIR", "GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_BRANCH"]
+
+
+def _assinatura_cfg_remoto():
+    return hash(tuple(_cfg(n) for n in _NOMES_CFG_REMOTO))
+
+
 @st.cache_resource(show_spinner=False)
-def _remoto_cliente():
+def _remoto_cliente_build(_assinatura):
     est = _estado_remoto()
     modo = _cfg("BACKUP_REMOTE").lower()
     if not modo and _cfg("S3_BUCKET"):
@@ -755,6 +769,10 @@ def _remoto_cliente():
         est["config_erro"] = f"{type(exc).__name__}: {exc}"
         print(f"Backup externo indisponível: {est['config_erro']}")
     return None
+
+
+def _remoto_cliente():
+    return _remoto_cliente_build(_assinatura_cfg_remoto())
 
 
 def _prefixo_remoto():
@@ -909,7 +927,7 @@ def _pos_restauracao():
 
 
 @st.cache_resource(show_spinner="Restaurando dados do backup externo...")
-def _restaurar_na_inicializacao():
+def _restaurar_na_inicializacao(_assinatura=None):
     """Roda uma vez por processo: traz do espelho o que faltar e, se o espelho estiver vazio, semeia com os dados locais."""
     r = _remoto_cliente()
     if r is None:
@@ -925,7 +943,7 @@ def _restaurar_na_inicializacao():
         return 0
 
 
-_restaurar_na_inicializacao()
+_restaurar_na_inicializacao(_assinatura_cfg_remoto())
 
 
 
@@ -5351,6 +5369,11 @@ if is_admin:
                 "reconstruir o serviço. Configure S3_BUCKET, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID e "
                 "S3_SECRET_ACCESS_KEY (ou GITHUB_TOKEN e GITHUB_REPO para usar um repositório privado do GitHub, "
                 "ou BACKUP_REMOTE=dir com BACKUP_REMOTE_DIR) e reinicie o app."
+            )
+            st.caption(
+                "Variáveis detectadas → "
+                + " · ".join(f"{n}: {'✅' if _cfg(n) else '❌'}" for n in ["GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_BRANCH"])
+                + f" · DATA_DIR: {'✅' if (os.getenv('DATA_DIR') or _cfg('DATA_DIR')) else '❌'}"
             )
             if rs["erro"]:
                 st.error(f"Falha ao iniciar o backup externo: {rs['erro']}")
