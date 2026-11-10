@@ -404,13 +404,17 @@ def _arquivos_de_dados_para_backup():
     if not DATA_DIR or not os.path.isdir(DATA_DIR):
         return []
     extensoes = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
+    ignorar_dirs = {"backups", "__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build"}
+    ignorar_arq = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
     arquivos = []
     for root, dirs, files in os.walk(DATA_DIR):
         # O diretório de backups não pode entrar dentro de outro backup.
-        dirs[:] = [d for d in dirs if os.path.abspath(os.path.join(root, d)) != os.path.abspath(BACKUP_DIR)]
+        dirs[:] = [d for d in dirs
+                   if os.path.abspath(os.path.join(root, d)) != os.path.abspath(BACKUP_DIR)
+                   and d not in ignorar_dirs and not d.startswith(".")]
         for nome in files:
             caminho = os.path.join(root, nome)
-            if Path(nome).suffix.lower() in extensoes:
+            if Path(nome).suffix.lower() in extensoes and nome.lower() not in ignorar_arq:
                 arquivos.append(caminho)
     return sorted(arquivos)
 
@@ -517,6 +521,412 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
     criar_backup_automatico("antes_salvar")
     garantir_diretorio()
     df.to_csv(caminho, index=False, encoding="utf-8-sig")
+    remoto_enviar_arquivo(caminho)   # espelho externo (no-op se não configurado)
+    remoto_snapshot()                # snapshot .zip externo (limitado por intervalo)
+
+
+# ================================================================
+# BACKUP EXTERNO / PERSISTÊNCIA FORA DO SERVIDOR (independe de Railway)
+# ----------------------------------------------------------------
+# Espelha cada arquivo de dados gravado pelo app em um armazenamento
+# externo e restaura automaticamente o que estiver faltando quando o
+# servidor reinicia com disco vazio.
+#
+# Configuração (variáveis de ambiente ou st.secrets):
+#   BACKUP_REMOTE=s3 | dir          (se S3_BUCKET existir, assume s3)
+#   S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+#   S3_ENDPOINT_URL                 (Cloudflare R2, Backblaze B2, MinIO...)
+#   S3_REGION                       (padrão "auto")
+#   BACKUP_REMOTE_DIR               (modo "dir": pasta externa/sincronizada)
+#   BACKUP_REMOTE_PREFIX            (padrão "premio-motoristas")
+#   BACKUP_REMOTE_SNAPSHOT_SEGUNDOS (padrão 600) | BACKUP_REMOTE_RETENCAO (padrão 30)
+# ================================================================
+import time as _time
+import json as _json
+
+_EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
+_NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
+_DIRS_IGNORADOS = {"backups", "__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build"}
+
+
+def _cfg(nome, padrao=""):
+    valor = os.getenv(nome)
+    if valor:
+        return str(valor).strip()
+    try:
+        valor = st.secrets.get(nome)
+        if valor:
+            return str(valor).strip()
+    except Exception:
+        pass
+    return padrao
+
+
+def _rel_dados(caminho):
+    """Caminho relativo (com '/') se o arquivo deve ser espelhado; senão None."""
+    base = os.path.abspath(DATA_DIR or ".")
+    rel = os.path.relpath(os.path.abspath(caminho), base).replace(os.sep, "/")
+    partes = rel.split("/")
+    if rel.startswith("..") or any(p in _DIRS_IGNORADOS or p.startswith(".") for p in partes[:-1]):
+        return None
+    if partes[-1].lower() in _NOMES_IGNORADOS or Path(partes[-1]).suffix.lower() not in _EXT_DADOS:
+        return None
+    return rel
+
+
+class _RemotoS3:
+    modo = "S3 compatível"
+
+    def __init__(self, bucket, endpoint, chave, segredo, regiao):
+        import boto3
+        from botocore.config import Config
+        self.bucket = bucket
+        self.c = boto3.client(
+            "s3", endpoint_url=endpoint or None, aws_access_key_id=chave,
+            aws_secret_access_key=segredo, region_name=regiao or "auto",
+            config=Config(connect_timeout=5, read_timeout=20, retries={"max_attempts": 2}, signature_version="s3v4"),
+        )
+
+    def put(self, key, data):
+        self.c.put_object(Bucket=self.bucket, Key=key, Body=data)
+
+    def get(self, key):
+        return self.c.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+
+    def list(self, prefix):
+        saida, token = [], None
+        while True:
+            kw = {"Bucket": self.bucket, "Prefix": prefix}
+            if token:
+                kw["ContinuationToken"] = token
+            r = self.c.list_objects_v2(**kw)
+            for o in r.get("Contents", []):
+                saida.append((o["Key"], o["Size"], o["LastModified"]))
+            if r.get("IsTruncated"):
+                token = r.get("NextContinuationToken")
+            else:
+                break
+        return saida
+
+    def delete(self, key):
+        self.c.delete_object(Bucket=self.bucket, Key=key)
+
+
+class _RemotoDir:
+    modo = "Pasta externa"
+
+    def __init__(self, pasta):
+        self.base = os.path.abspath(pasta)
+        os.makedirs(self.base, exist_ok=True)
+
+    def _p(self, key):
+        destino = os.path.abspath(os.path.join(self.base, key))
+        if not destino.startswith(self.base + os.sep):
+            raise ValueError("chave inválida")
+        return destino
+
+    def put(self, key, data):
+        p = self._p(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, p)
+
+    def get(self, key):
+        with open(self._p(key), "rb") as f:
+            return f.read()
+
+    def list(self, prefix):
+        saida = []
+        for root, _d, files in os.walk(self.base):
+            for n in files:
+                if n.endswith(".tmp"):
+                    continue
+                p = os.path.join(root, n)
+                key = os.path.relpath(p, self.base).replace(os.sep, "/")
+                if key.startswith(prefix):
+                    saida.append((key, os.path.getsize(p), datetime.fromtimestamp(os.path.getmtime(p))))
+        return saida
+
+    def delete(self, key):
+        try:
+            os.remove(self._p(key))
+        except OSError:
+            pass
+
+
+class _RemotoGitHub:
+    """Backup em um repositório PRIVADO do GitHub (gratuito, sem cartão). O histórico de versões é o histórico de commits."""
+    modo = "GitHub (repositório privado)"
+    snapshots = False  # o próprio git já guarda as versões
+
+    def __init__(self, token, repo, branch="main"):
+        if not token or "/" not in (repo or ""):
+            raise ValueError("defina GITHUB_TOKEN e GITHUB_REPO (formato usuario/repositorio)")
+        self.token, self.repo, self.branch = token, repo.strip("/"), branch or "main"
+
+    def _req(self, metodo, caminho, corpo=None, raw=False):
+        import urllib.request, urllib.error
+        dados = _json.dumps(corpo).encode("utf-8") if corpo is not None else None
+        req = urllib.request.Request(f"https://api.github.com/repos/{self.repo}/{caminho}", data=dados, method=metodo)
+        req.add_header("Authorization", f"Bearer {self.token}")
+        req.add_header("Accept", "application/vnd.github.raw" if raw else "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "premio-motoristas-backup")
+        if dados is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _url(self, key):
+        from urllib.parse import quote
+        return f"contents/{quote(key)}?ref={quote(self.branch)}"
+
+    def _sha(self, key):
+        status, corpo = self._req("GET", self._url(key))
+        return _json.loads(corpo).get("sha") if status == 200 else None
+
+    def put(self, key, data):
+        from urllib.parse import quote
+        blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        for _ in range(2):
+            sha = self._sha(key)
+            if sha == blob:
+                return  # conteúdo idêntico: não gera commit
+            corpo = {"message": f"backup: {key}", "content": base64.b64encode(data).decode("ascii"), "branch": self.branch}
+            if sha:
+                corpo["sha"] = sha
+            status, resp = self._req("PUT", f"contents/{quote(key)}", corpo)
+            if status in (200, 201):
+                return
+            if status not in (409, 422):
+                raise RuntimeError(f"GitHub {status}: {resp[:200]!r}")
+        raise RuntimeError("GitHub: conflito ao gravar o arquivo")
+
+    def get(self, key):
+        status, resp = self._req("GET", self._url(key), raw=True)
+        if status != 200:
+            raise RuntimeError(f"GitHub {status} ao ler {key}")
+        return resp
+
+    def list(self, prefix):
+        from urllib.parse import quote
+        status, resp = self._req("GET", f"git/trees/{quote(self.branch)}?recursive=1")
+        if status in (404, 409):
+            return []
+        if status != 200:
+            raise RuntimeError(f"GitHub {status}: {resp[:200]!r}")
+        return [(i["path"], i.get("size", 0), None) for i in _json.loads(resp).get("tree", [])
+                if i.get("type") == "blob" and i["path"].startswith(prefix)]
+
+    def delete(self, key):
+        from urllib.parse import quote
+        sha = self._sha(key)
+        if sha:
+            self._req("DELETE", f"contents/{quote(key)}", {"message": f"remove: {key}", "sha": sha, "branch": self.branch})
+
+
+@st.cache_resource(show_spinner=False)
+def _estado_remoto():
+    return {"ultimo_ok": None, "erro": None, "ultimo_snapshot": 0.0, "config_erro": None}
+
+
+@st.cache_resource(show_spinner=False)
+def _remoto_cliente():
+    est = _estado_remoto()
+    modo = _cfg("BACKUP_REMOTE").lower()
+    if not modo and _cfg("S3_BUCKET"):
+        modo = "s3"
+    if not modo and _cfg("GITHUB_TOKEN") and _cfg("GITHUB_REPO"):
+        modo = "github"
+    try:
+        if modo == "github":
+            return _RemotoGitHub(_cfg("GITHUB_TOKEN"), _cfg("GITHUB_REPO"), _cfg("GITHUB_BRANCH", "main"))
+        if modo == "s3":
+            return _RemotoS3(_cfg("S3_BUCKET"), _cfg("S3_ENDPOINT_URL"), _cfg("S3_ACCESS_KEY_ID"),
+                             _cfg("S3_SECRET_ACCESS_KEY"), _cfg("S3_REGION", "auto"))
+        if modo == "dir" and _cfg("BACKUP_REMOTE_DIR"):
+            return _RemotoDir(_cfg("BACKUP_REMOTE_DIR"))
+    except Exception as exc:
+        est["config_erro"] = f"{type(exc).__name__}: {exc}"
+        print(f"Backup externo indisponível: {est['config_erro']}")
+    return None
+
+
+def _prefixo_remoto():
+    return (_cfg("BACKUP_REMOTE_PREFIX", "premio-motoristas") or "premio-motoristas").strip("/")
+
+
+def _marcar_ok():
+    est = _estado_remoto()
+    est["ultimo_ok"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    est["erro"] = None
+
+
+def _marcar_erro(exc):
+    _estado_remoto()["erro"] = f"{type(exc).__name__}: {exc}"
+    print(f"Aviso: falha no backup externo: {exc}")
+
+
+def remoto_status():
+    est = _estado_remoto()
+    r = _remoto_cliente()
+    return {"ativo": r is not None, "modo": getattr(r, "modo", ""), "erro": est.get("erro") or est.get("config_erro"),
+            "ultimo_ok": est.get("ultimo_ok")}
+
+
+def remoto_enviar_arquivo(caminho):
+    r = _remoto_cliente()
+    if r is None:
+        return False
+    try:
+        rel = _rel_dados(caminho)
+        if rel is None or not os.path.isfile(caminho):
+            return False
+        with open(caminho, "rb") as f:
+            r.put(f"{_prefixo_remoto()}/dados/{rel}", f.read())
+        _marcar_ok()
+        return True
+    except Exception as exc:
+        _marcar_erro(exc)
+        return False
+
+
+def remoto_enviar_tudo():
+    n = 0
+    for caminho in _arquivos_de_dados_para_backup():
+        if remoto_enviar_arquivo(caminho):
+            n += 1
+    return n
+
+
+def remoto_snapshot(forcar=False):
+    """Envia um .zip completo (histórico de versões). Limitado por intervalo, salvo se forçado."""
+    r = _remoto_cliente()
+    if r is None:
+        return False
+    if not getattr(r, "snapshots", True):
+        return False
+    est = _estado_remoto()
+    intervalo = int(_cfg("BACKUP_REMOTE_SNAPSHOT_SEGUNDOS", "600") or 600)
+    if not forcar and _time.time() - est["ultimo_snapshot"] < intervalo:
+        return False
+    try:
+        pref = f"{_prefixo_remoto()}/snapshots/"
+        r.put(pref + _nome_backup("snapshot"), criar_backup_manual_bytes())
+        est["ultimo_snapshot"] = _time.time()
+        retencao = int(_cfg("BACKUP_REMOTE_RETENCAO", "30") or 30)
+        antigos = sorted(r.list(pref), key=lambda x: x[0], reverse=True)[retencao:]
+        for key, _s, _m in antigos:
+            r.delete(key)
+        _marcar_ok()
+        return True
+    except Exception as exc:
+        _marcar_erro(exc)
+        return False
+
+
+def remoto_listar_snapshots():
+    r = _remoto_cliente()
+    if r is None or not getattr(r, "snapshots", True):
+        return []
+    try:
+        pref = f"{_prefixo_remoto()}/snapshots/"
+        itens = sorted(r.list(pref), key=lambda x: x[0], reverse=True)
+        return [{"ARQUIVO": k[len(pref):], "TAMANHO": f"{s/1024:.1f} KB",
+                 "DATA": m.strftime("%d/%m/%Y %H:%M:%S") if hasattr(m, "strftime") else str(m), "KEY": k}
+                for k, s, m in itens]
+    except Exception as exc:
+        _marcar_erro(exc)
+        return []
+
+
+def remoto_baixar_snapshot(key):
+    r = _remoto_cliente()
+    return r.get(key) if r is not None else b""
+
+
+def remoto_restaurar(sobrescrever=False):
+    """Baixa os arquivos de dados do espelho externo. Por padrão só traz o que falta localmente."""
+    r = _remoto_cliente()
+    if r is None:
+        return 0
+    base = os.path.abspath(DATA_DIR or ".")
+    pref = f"{_prefixo_remoto()}/dados/"
+    n = 0
+    for key, _s, _m in r.list(pref):
+        rel = key[len(pref):]
+        if not rel or _rel_dados(os.path.join(base, rel)) is None:
+            continue
+        destino = os.path.abspath(os.path.join(base, rel))
+        if not destino.startswith(base + os.sep):
+            continue
+        if os.path.exists(destino) and not sobrescrever:
+            continue
+        os.makedirs(os.path.dirname(destino), exist_ok=True)
+        with open(destino, "wb") as f:
+            f.write(r.get(key))
+        n += 1
+    _marcar_ok()
+    return n
+
+
+def restaurar_zip_bytes(dados, sobrescrever=True):
+    """Restaura um .zip de backup (gerado pelo próprio app) para o DATA_DIR."""
+    base = os.path.abspath(DATA_DIR or ".")
+    n = 0
+    with zipfile.ZipFile(io.BytesIO(dados)) as zf:
+        for info in zf.infolist():
+            nome = info.filename
+            if info.is_dir() or nome == "MANIFESTO.txt":
+                continue
+            destino = os.path.abspath(os.path.join(base, nome))
+            if not destino.startswith(base + os.sep) or _rel_dados(destino) is None:
+                continue
+            if os.path.exists(destino) and not sobrescrever:
+                continue
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            with open(destino, "wb") as f:
+                f.write(zf.read(info))
+            remoto_enviar_arquivo(destino)
+            n += 1
+    return n
+
+
+def _pos_restauracao():
+    """Limpa caches/estado de sessão para o app reler os arquivos restaurados."""
+    for k in ["ausencias", "desclassificacoes", "categorias_vigencia", "mapa_cat_custom",
+              "excesso_velocidade", "controle_jornada"]:
+        st.session_state.pop(k, None)
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+
+
+@st.cache_resource(show_spinner="Restaurando dados do backup externo...")
+def _restaurar_na_inicializacao():
+    """Roda uma vez por processo: traz do espelho o que faltar e, se o espelho estiver vazio, semeia com os dados locais."""
+    r = _remoto_cliente()
+    if r is None:
+        return 0
+    try:
+        garantir_diretorio()
+        n = remoto_restaurar(False)
+        if not r.list(f"{_prefixo_remoto()}/dados/"):
+            remoto_enviar_tudo()
+        return n
+    except Exception as exc:
+        _marcar_erro(exc)
+        return 0
+
+
+_restaurar_na_inicializacao()
+
 
 
 def carregar_ausencias() -> pd.DataFrame:
@@ -3382,6 +3792,7 @@ def _salvar_tema_usuario(usuario, tema):
         os.makedirs(os.path.dirname(ARQUIVO_TEMAS_USUARIOS) or ".", exist_ok=True)
         with open(ARQUIVO_TEMAS_USUARIOS, "w", encoding="utf-8") as f:
             _json.dump(dados, f, ensure_ascii=False, indent=2)
+        remoto_enviar_arquivo(ARQUIVO_TEMAS_USUARIOS)
     except Exception as exc:
         print(f"Não foi possível salvar o tema do usuário: {exc}")
 
@@ -4919,29 +5330,89 @@ if is_admin:
             "controles e históricos. O código cria um snapshot automático antes das gravações."
         )
 
-        volume_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
         data_abs = os.path.abspath(DATA_DIR or ".")
+        rs = remoto_status()
         colb1, colb2, colb3 = st.columns(3)
         with colb1:
             st.metric("Arquivos de dados", len(_arquivos_de_dados_para_backup()))
         with colb2:
             backups_info = _listar_backups_salvos()
-            st.metric("Backups armazenados", len(backups_info))
+            st.metric("Backups locais", len(backups_info))
         with colb3:
-            if volume_mount:
-                st.success("🟢 Volume Railway detectado")
+            if rs["ativo"]:
+                st.success(f"🟢 Backup externo ativo ({rs['modo']})")
             else:
-                st.warning("🟡 Sem Volume Railway detectado")
+                st.warning("🟡 Backup externo não configurado")
 
         st.caption(f"Pasta de dados atual: {data_abs}")
-        if volume_mount:
-            st.caption(f"Volume Railway: {volume_mount}")
-        else:
+        if not rs["ativo"]:
             st.warning(
-                "Atenção: sem um Volume persistente, os arquivos gravados no sistema podem "
-                "ser perdidos quando a hospedagem reconstruir o serviço. No Railway, o Volume "
-                "precisa estar montado na mesma pasta definida em DATA_DIR."
+                "Sem backup externo, os dados gravados no servidor podem ser perdidos quando a hospedagem "
+                "reconstruir o serviço. Configure S3_BUCKET, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID e "
+                "S3_SECRET_ACCESS_KEY (ou GITHUB_TOKEN e GITHUB_REPO para usar um repositório privado do GitHub, "
+                "ou BACKUP_REMOTE=dir com BACKUP_REMOTE_DIR) e reinicie o app."
             )
+            if rs["erro"]:
+                st.error(f"Falha ao iniciar o backup externo: {rs['erro']}")
+        else:
+            if rs["erro"]:
+                st.error(f"Último erro de sincronização: {rs['erro']}")
+            elif rs["ultimo_ok"]:
+                st.caption(f"☁️ Última sincronização com sucesso: {rs['ultimo_ok']}")
+
+            st.markdown("#### ☁️ Backup externo")
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                if st.button("☁️ Enviar tudo agora", key="remoto_enviar_tudo", use_container_width=True):
+                    n_env = remoto_enviar_tudo(); remoto_snapshot(forcar=True)
+                    st.success(f"{n_env} arquivo(s) enviados e snapshot criado.")
+            with e2:
+                if st.button("⬇️ Restaurar arquivos ausentes", key="remoto_rest_falta", use_container_width=True):
+                    n_rest = remoto_restaurar(False)
+                    _pos_restauracao()
+                    st.success(f"{n_rest} arquivo(s) restaurados.")
+                    st.rerun()
+            with e3:
+                conf_sobre = st.checkbox("Confirmo sobrescrever os dados atuais", key="remoto_conf_sobre")
+                if st.button("♻️ Restaurar tudo (sobrescreve)", key="remoto_rest_tudo", use_container_width=True, disabled=not conf_sobre):
+                    try:
+                        garantir_diretorio(); os.makedirs(BACKUP_DIR, exist_ok=True)
+                        with open(os.path.join(BACKUP_DIR, _nome_backup("antes_restaurar")), "wb") as f:
+                            f.write(criar_backup_manual_bytes())
+                    except Exception:
+                        pass
+                    n_rest = remoto_restaurar(True)
+                    _pos_restauracao()
+                    st.success(f"{n_rest} arquivo(s) restaurados do backup externo.")
+                    st.rerun()
+
+            if rs["modo"].startswith("GitHub"):
+                st.caption("🗂️ O histórico de versões está nos commits do repositório do GitHub.")
+            snaps = remoto_listar_snapshots()
+            if snaps:
+                st.markdown("#### 🗂️ Snapshots externos (histórico de versões)")
+                st.dataframe(pd.DataFrame(snaps)[["ARQUIVO", "DATA", "TAMANHO"]], use_container_width=True, hide_index=True)
+                sel_snap = st.selectbox("Selecionar snapshot", [x["ARQUIVO"] for x in snaps], key="remoto_snap_sel")
+                item_snap = next((x for x in snaps if x["ARQUIVO"] == sel_snap), None)
+                if item_snap:
+                    try:
+                        st.download_button("⬇️ Baixar snapshot selecionado", data=remoto_baixar_snapshot(item_snap["KEY"]),
+                                           file_name=item_snap["ARQUIVO"], mime="application/zip",
+                                           key="remoto_snap_dl", use_container_width=True)
+                    except Exception as exc:
+                        st.error(f"Não foi possível ler o snapshot: {exc}")
+
+        with st.expander("📥 Restaurar a partir de um arquivo .zip de backup"):
+            up_zip = st.file_uploader("Arquivo .zip gerado por este sistema", type=["zip"], key="restaurar_zip_up")
+            conf_zip = st.checkbox("Confirmo sobrescrever os dados atuais com o conteúdo do .zip", key="restaurar_zip_conf")
+            if st.button("Restaurar do .zip", key="restaurar_zip_btn", disabled=(up_zip is None or not conf_zip)):
+                try:
+                    n_zip = restaurar_zip_bytes(up_zip.getvalue(), sobrescrever=True)
+                    _pos_restauracao()
+                    st.success(f"{n_zip} arquivo(s) restaurados.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível restaurar: {exc}")
 
         b1, b2 = st.columns(2)
         with b1:
