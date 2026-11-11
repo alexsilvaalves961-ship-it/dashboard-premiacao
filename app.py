@@ -572,7 +572,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v8"
+_VERSAO_BACKUP = "v9"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4056,6 +4056,39 @@ section[data-testid="stSidebar"] .stButton>button,section[data-testid="stSidebar
 .stApp .login-brand p{color:var(--hero-muted);margin:0;}
 """
 
+_CSS_MODERNO = """
+.kpi{background:var(--surface)!important;border:1px solid var(--line)!important;border-radius:var(--radius);
+  padding:16px 18px;min-height:98px;position:relative;overflow:hidden;box-shadow:var(--shadow);}
+.kpi:hover{border-color:var(--accent)!important;}
+.kpi::before{content:"";position:absolute;left:0;top:16px;bottom:16px;width:3px;border-radius:0 3px 3px 0;background:var(--accent);}
+.kpi .label{display:flex;align-items:center;gap:9px;margin-bottom:10px;}
+.stApp .kpi .label span{color:var(--muted);font-size:.72rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase;}
+.stApp .kpi .label .ico{width:28px;height:28px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;
+  font-size:14px;letter-spacing:0;background:color-mix(in srgb,var(--accent) 15%,transparent);}
+.kpi .value{font-size:1.6rem;font-weight:850;letter-spacing:-.6px;line-height:1.1;
+  background:var(--kpi-val);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.chart-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;
+  box-shadow:var(--shadow);margin-bottom:14px;min-height:240px;}
+.chart-title{font-weight:800;font-size:.98rem;color:var(--text);}
+.chart-sub{font-size:.76rem;color:var(--muted);margin:2px 0 14px;}
+.bar-row{display:grid;grid-template-columns:minmax(96px,32%) 1fr auto;align-items:center;gap:12px;margin:9px 0;}
+.bar-label{font-size:.8rem;font-weight:700;color:var(--text);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bar-track{height:10px;border-radius:999px;background:color-mix(in srgb,var(--text) 9%,transparent);overflow:hidden;}
+.bar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,color-mix(in srgb,var(--bc) 70%,#000),var(--bc));}
+.bar-val{font-size:.8rem;font-weight:800;color:var(--text);min-width:84px;font-variant-numeric:tabular-nums;}
+.overview{display:flex;gap:30px;align-items:center;flex-wrap:wrap;background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--radius);padding:22px 26px;box-shadow:var(--shadow);margin:4px 0 16px;}
+.ov-main{flex:1;min-width:280px;}
+.ov-eyebrow{font-size:.72rem;font-weight:850;letter-spacing:.6px;color:var(--muted);text-transform:uppercase;}
+.ov-big{font-size:2.3rem;font-weight:850;letter-spacing:-1px;color:var(--text);line-height:1.1;margin:4px 0 2px;}
+.ov-desc{font-size:.84rem;color:var(--muted);margin-bottom:14px;}
+.ov-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;}
+.ov-pill{border:1px solid color-mix(in srgb,var(--pc) 35%,var(--line));border-radius:calc(var(--radius) - 4px);
+  padding:12px 14px;background:color-mix(in srgb,var(--pc) 8%,var(--surface2));}
+.ov-pill b{display:block;font-size:1.25rem;color:var(--pc);font-weight:850;letter-spacing:-.3px;}
+.stApp .ov-pill span{font-size:.75rem;color:var(--muted);}
+"""
+
 
 def _css_tema(t):
     k = t["k"]
@@ -4067,9 +4100,10 @@ def _css_tema(t):
         f"--hero:{t['hero']};--hero-text:{t['hero_text']};--hero-muted:{t['hero_muted']};"
         f"--input:{t['input']};--btn:{t['btn']};--btn-text:{t['btn_text']};--btn-hover:{t['btn_hover']};"
         f"--shadow:{t['shadow']};--radius:{t['radius']};--lift:{t['lift']};"
+        f"--kpi-val:{('linear-gradient(90deg,'+t['accent']+','+t['k'][3]+')') if t['nome'] in ('Dinâmico','Azul Ciapetro') else 'var(--text)'};"
         f"--periodo-bg:{t['periodo_bg']};--periodo-text:{t['periodo_text']};--logo-bg:{t['logo_bg']};}}"
     )
-    return variaveis + _CSS_TEMA_BASE
+    return variaveis + _CSS_TEMA_BASE + _CSS_MODERNO
 
 
 def injetar_tema():
@@ -4111,6 +4145,52 @@ def seletor_tema():
         pontos = "".join(f"<i style='background:{c}'></i>" for c in [t["surface"]] + t["k"][:4])
         st.markdown(f"<div class='tema-dots'>{pontos}</div>", unsafe_allow_html=True)
         st.caption(t["desc"])
+
+def _esc(x):
+    return _html.escape(str(x))
+
+
+def kpi_html(lab, val):
+    m = re.match(r"^(\S+)\s+(.+)$", str(lab))
+    ico, txt = (m.group(1), m.group(2)) if (m and not m.group(1)[0].isalnum()) else ("", str(lab))
+    chip = f'<span class="ico">{ico}</span>' if ico else ""
+    return f'<div class="kpi"><div class="label">{chip}<span>{_esc(txt)}</span></div><div class="value">{_esc(val)}</div></div>'
+
+
+def barras_html(titulo, sub, df, fmt, cor_idx=0, maxn=7):
+    d = df.head(maxn).copy()
+    d["VALOR"] = pd.to_numeric(d["VALOR"], errors="coerce").fillna(0)
+    mx = float(d["VALOR"].max()) if len(d) else 0.0
+    cor = _tema_atual()["chart"][cor_idx % 6]
+    linhas = "".join(
+        f'<div class="bar-row"><div class="bar-label" title="{_esc(i)}">{_esc(i)}</div>'
+        f'<div class="bar-track"><div class="bar-fill" style="width:{(max(float(v) / mx * 100, 2.0) if mx > 0 and v > 0 else 0):.1f}%"></div></div>'
+        f'<div class="bar-val">{_esc(fmt(v))}</div></div>'
+        for i, v in zip(d.index, d["VALOR"])
+    )
+    html_ = (f'<div class="chart-card" style="--bc:{cor}"><div class="chart-title">{_esc(titulo)}</div>'
+             f'<div class="chart-sub">{_esc(sub)}</div>{linhas}</div>')
+    st.markdown(html_.replace("$", "&#36;"), unsafe_allow_html=True)
+
+
+def overview_html(total, premiados, media_premio, f_premio, f_km, f_media, brl):
+    import math
+    pct = (premiados / total * 100) if total else 0.0
+    r = 52
+    circ = 2 * math.pi * r
+    svg = (f'<svg viewBox="0 0 140 140" width="150" height="150"><circle cx="70" cy="70" r="{r}" fill="none" style="stroke:var(--line)" stroke-width="14"/>'
+           f'<circle cx="70" cy="70" r="{r}" fill="none" style="stroke:var(--k2)" stroke-width="14" stroke-linecap="round" '
+           f'stroke-dasharray="{circ * pct / 100:.1f} {circ:.1f}" transform="rotate(-90 70 70)"/>'
+           f'<text x="70" y="68" text-anchor="middle" font-size="26" font-weight="800" style="fill:var(--text)">{pct:.1f}%</text>'
+           f'<text x="70" y="88" text-anchor="middle" font-size="10" font-weight="700" style="fill:var(--muted)">COM PRÊMIO</text></svg>')
+    pills = (f'<div class="ov-pill" style="--pc:var(--k2)"><b>{premiados}</b><span>Motoristas com prêmio</span></div>'
+             f'<div class="ov-pill" style="--pc:var(--k3)"><b>{total - premiados}</b><span>Sem prêmio</span></div>'
+             f'<div class="ov-pill" style="--pc:var(--k1)"><b>{_esc(brl(media_premio))}</b><span>Prêmio médio (premiados)</span></div>'
+             f'<div class="ov-pill" style="--pc:var(--k4)"><b>{_esc(f_media)}</b><span>Média KM/L da frota</span></div>')
+    html_ = (f'<div class="overview">{svg}<div class="ov-main"><div class="ov-eyebrow">Visão geral da competência</div>'
+             f'<div class="ov-big">{total}</div><div class="ov-desc">motoristas avaliados · total em prêmios {_esc(f_premio)} · {_esc(f_km)} rodados</div>'
+             f'<div class="ov-grid">{pills}</div></div></div>')
+    return html_.replace("$", "&#36;")
 
 
 def render_hero(dt_ini, dt_fim):
@@ -4498,7 +4578,7 @@ current = aplicar_filtros_st(dt_ini, dt_fim, mot, placa, cat, filial)
 
 kpis=st.columns(6)
 for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
-    c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
+    c.markdown(kpi_html(lab,val),unsafe_allow_html=True)
 
 tab_labels=["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","🚚 Múltiplas Placas","🏷️ Categorias por Placa","⚙️ Cadastros","📄 Recibos","🏥 Ausências","🚨 Excesso de Velocidade","⏱️ Controle de Jornada","🚫 Desclassificações","👔 Relatório RH"]
 if is_admin:
@@ -4526,65 +4606,38 @@ with tabs[0]:
     if res_f.empty:
         st.info("Não há dados para os filtros selecionados.")
     else:
-        g1,g2,g3,g4,g5=st.columns(5)
-        for c,(lab,val) in zip((g1,g2,g3,g4,g5),[("💰 Prêmio",f_premio),("📍 KM",f_km),("🧪 Litros",f_litros),("🎯 Média",f_media),("👥 Motoristas",f_mots)]):
-            c.markdown(f'<div class="kpi"><div class="label">{lab}</div><div class="value">{val}</div></div>',unsafe_allow_html=True)
-        st.markdown("<div style='height:6px'></div>",unsafe_allow_html=True)
 
         premio_cat=res_f.groupby("CATEGORIA",dropna=False)["PREMIO"].sum().sort_values(ascending=False).to_frame("VALOR"); premio_cat.index=premio_cat.index.fillna("SEM CATEGORIA")
         premio_filial=res_f.assign(BASE=res_f["BASE"].fillna("SEM FILIAL")).groupby("BASE")["PREMIO"].sum().sort_values(ascending=False).to_frame("VALOR")
         top_mots=res_f[["MOTORISTA","PREMIO"]].copy().sort_values("PREMIO",ascending=False).head(7).set_index("MOTORISTA").rename(columns={"PREMIO":"VALOR"})
         consumo_cat=res_f.groupby("CATEGORIA",dropna=False)[["KM_TOTAL","LITROS_TOTAL"]].sum().sort_values("KM_TOTAL",ascending=False); consumo_cat.index=consumo_cat.index.fillna("SEM CATEGORIA")
 
-        def _hbar(df,title,fmt,color,height=2.2,maxn=7):
-            d=df.head(maxn).copy(); d["VALOR"]=pd.to_numeric(d["VALOR"],errors="coerce").fillna(0); d=d.sort_values("VALOR")
-            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("none"); _card_bg(fig)
-            bars=ax.barh(d.index.astype(str),d["VALOR"],color=_tc(color),height=.52)
-            for s in ax.spines.values(): s.set_visible(False)
-            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors=_tema_atual()["muted"]); ax.set_xlabel(''); ax.set_ylabel('')
-            mx=max(float(d["VALOR"].max()),1); ax.set_xlim(0,mx*1.22)
-            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_width()+mx*.014,b.get_y()+b.get_height()/2,fmt(v),va='center',fontsize=7.8,color=_tema_atual()["text"],fontweight='bold')
-            ax.set_title(title,loc='left',fontsize=10,color=_tema_atual()["text"],fontweight='bold',pad=6); fig.tight_layout(pad=.9); return fig
-
-        def _vbar(df,title,fmt,color,height=2.2):
-            d=df.copy(); d["VALOR"]=pd.to_numeric(d["VALOR"],errors="coerce").fillna(0)
-            fig,ax=plt.subplots(figsize=(6.0,height),dpi=120); fig.patch.set_alpha(0); ax.set_facecolor("none"); _card_bg(fig)
-            bars=ax.bar(d.index.astype(str),d["VALOR"],color=_tc(color),width=.55)
-            for s in ax.spines.values(): s.set_visible(False)
-            ax.grid(False); ax.tick_params(axis='both',length=0,labelsize=7.7,colors=_tema_atual()["muted"]); ax.tick_params(axis='x',rotation=15); ax.set_ylabel(''); ax.set_xlabel('')
-            mx=max(float(d["VALOR"].max()),1); ax.set_ylim(0,mx*1.22)
-            for b,v in zip(bars,d["VALOR"]): ax.text(b.get_x()+b.get_width()/2,b.get_height()+mx*.022,fmt(v),ha='center',va='bottom',fontsize=7.6,color=_tema_atual()["text"],fontweight='bold')
-            ax.set_title(title,loc='left',fontsize=10,color=_tema_atual()["text"],fontweight='bold',pad=6); fig.tight_layout(pad=.9); return fig
+        _prem=pd.to_numeric(res_f["PREMIO"],errors="coerce").fillna(0)
+        st.markdown(overview_html(len(res_f),int((_prem>0).sum()),float(_prem[_prem>0].mean()) if (_prem>0).any() else 0.0,f_premio,f_km,f_media,_brl),unsafe_allow_html=True)
 
         c1,c2=st.columns(2)
-        with c1:
-            st.pyplot(_hbar(premio_cat,"💰 Prêmio por Categoria",_brl,"#17215C"),use_container_width=True)
-        with c2:
-            st.pyplot(_hbar(premio_filial,"🏢 Prêmio por Filial",_brl,"#0099DA"),use_container_width=True)
+        with c1: barras_html("💰 Prêmio por Categoria",f"Total {_brl(premio_cat['VALOR'].sum())}",premio_cat,_brl,0)
+        with c2: barras_html("🏢 Prêmio por Filial",f"{len(premio_filial)} filial(is) na competência",premio_filial,_brl,1)
 
-        c3,c4=st.columns(2)
         km_df=consumo_cat[["KM_TOTAL"]].rename(columns={"KM_TOTAL":"VALOR"}); lit_df=consumo_cat[["LITROS_TOTAL"]].rename(columns={"LITROS_TOTAL":"VALOR"})
-        with c3:
-            st.pyplot(_vbar(km_df,"📍 KM por Categoria",_km,"#0099DA"),use_container_width=True)
-        with c4:
-            st.pyplot(_vbar(lit_df,"🧪 Litros por Categoria",_lit,"#E1B700"),use_container_width=True)
+        c3,c4=st.columns(2)
+        with c3: barras_html("📍 KM por Categoria",f"Total {_km(km_df['VALOR'].sum())}",km_df,_km,0)
+        with c4: barras_html("🧪 Litros por Categoria",f"Total {_lit(lit_df['VALOR'].sum())}",lit_df,_lit,1)
 
+        des=[]
+        if "DESCONTO_EXCESSO_VELOCIDADE" in res_f.columns: des.append(("Velocidade",float(pd.to_numeric(res_f["DESCONTO_EXCESSO_VELOCIDADE"],errors="coerce").fillna(0).sum())))
+        if "DESCONTO_CONTROLE_JORNADA" in res_f.columns: des.append(("Jornada",float(pd.to_numeric(res_f["DESCONTO_CONTROLE_JORNADA"],errors="coerce").fillna(0).sum())))
+        dfd=pd.DataFrame(des,columns=["TIPO","VALOR"]).set_index("TIPO") if des else pd.DataFrame({"VALOR":[0]},index=["Sem descontos"])
         c5,c6=st.columns(2)
-        with c5:
-            st.pyplot(_hbar(top_mots,"🏅 Top 7 Motoristas por Prêmio",_brl,"#1F5F8B",2.25,7),use_container_width=True)
-        with c6:
-            des=[]
-            if "DESCONTO_EXCESSO_VELOCIDADE" in res_f.columns: des.append(("Velocidade",float(pd.to_numeric(res_f["DESCONTO_EXCESSO_VELOCIDADE"],errors="coerce").fillna(0).sum())))
-            if "DESCONTO_CONTROLE_JORNADA" in res_f.columns: des.append(("Jornada",float(pd.to_numeric(res_f["DESCONTO_CONTROLE_JORNADA"],errors="coerce").fillna(0).sum())))
-            dfd=pd.DataFrame(des,columns=["TIPO","VALOR"]).set_index("TIPO") if des else pd.DataFrame({"VALOR":[0]},index=["Sem descontos"])
-            st.pyplot(_vbar(dfd,"📉 Descontos por Pilar",_brl,"#D59A00"),use_container_width=True)
+        with c5: barras_html("🏅 Top 7 Motoristas por Prêmio","Maiores prêmios da competência",top_mots,_brl,0)
+        with c6: barras_html("📉 Descontos por Pilar",f"Total {_brl(dfd['VALOR'].sum())}",dfd,_brl,4)
 
         ev=[]
         if "EVENTOS_EXCESSO_VELOCIDADE" in res_f.columns: ev.append(("Velocidade",float(pd.to_numeric(res_f["EVENTOS_EXCESSO_VELOCIDADE"],errors="coerce").fillna(0).sum())))
         if "EVENTOS_CONTROLE_JORNADA" in res_f.columns: ev.append(("Jornada",float(pd.to_numeric(res_f["EVENTOS_CONTROLE_JORNADA"],errors="coerce").fillna(0).sum())))
         if ev:
             evdf=pd.DataFrame(ev,columns=["TIPO","VALOR"]).set_index("TIPO")
-            st.pyplot(_vbar(evdf,"⚠️ Eventos dos Pilares",_int,"#D66D00",2.0),use_container_width=True)
+            barras_html("⚠️ Eventos dos Pilares","Ocorrências registradas na competência",evdf,_int,2)
 with tabs[1]:
     st.subheader("📊 Resumo de Abastecimentos")
     st.caption(
