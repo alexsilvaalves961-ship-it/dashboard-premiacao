@@ -30,17 +30,49 @@ if not DATA_DIR:
     DATA_DIR = ""
 DATA_DIR = DATA_DIR.strip() or "."
 
+# Planilhas de ENTRADA (abastecimentos_MMYYYY.xlsx, viagens MM_YYYY.xlsx, extratos de velocidade,
+# uah_abastecimentos_3.xlsx) ficam na pasta do aplicativo (repositório). Já os dados GRAVADOS pelo app
+# (CSV, JSON) ficam em DATA_DIR. Se quiser, defina ENTRADAS_DIR para apontar outra pasta de planilhas.
+ENTRADAS_DIR = (os.getenv("ENTRADAS_DIR") or "").strip()
+if not ENTRADAS_DIR:
+  try:
+    ENTRADAS_DIR = str(st.secrets.get("ENTRADAS_DIR", "") or "").strip()
+  except Exception:
+    ENTRADAS_DIR = ""
+ENTRADAS_DIR = ENTRADAS_DIR or "."
+
+def _pastas_entrada():
+  pastas = [ENTRADAS_DIR]
+  if DATA_DIR not in pastas:
+    pastas.append(DATA_DIR)  # compatibilidade: planilhas colocadas junto dos dados também são encontradas
+  return pastas
+
+def _listar_nomes_entrada():
+  vistos, saida = set(), []
+  for pasta in _pastas_entrada():
+    try:
+      nomes = os.listdir(pasta)
+    except OSError:
+      continue
+    for nome in nomes:
+      if nome not in vistos:
+        vistos.add(nome)
+        saida.append((pasta, nome))
+  return saida
+
+def _caminho_entrada(nome):
+  for pasta in _pastas_entrada():
+    caminho = os.path.join(pasta, nome)
+    if os.path.isfile(caminho):
+      return caminho
+  return os.path.join(ENTRADAS_DIR, nome)
+
 # Arquivos mensais de viagens: exemplo "viagens 08_2026.xlsx".
 # O aplicativo procura automaticamente todos os arquivos nesse padrão no mesmo diretório
 # dos demais arquivos hospedeiros.
 def _listar_arquivos_viagens():
-  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
-  try:
-    nomes = os.listdir(diretorio)
-  except OSError:
-    return []
   encontrados = []
-  for nome in nomes:
+  for diretorio, nome in _listar_nomes_entrada():
     if re.fullmatch(r"viagens\s+\d{2}_\d{4}\.(xlsx|xlsm|xls)", nome, flags=re.IGNORECASE):
       encontrados.append(os.path.join(diretorio, nome))
   return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
@@ -56,14 +88,9 @@ def _token_arquivos_viagens():
 
 
 def _listar_arquivos_velocidade():
-  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
-  try:
-    nomes = os.listdir(diretorio)
-  except OSError:
-    return []
   encontrados = []
   padrao = r"Extrato\s+de\s+Velocidade\s+excedida\s+\d{2}-\d{2}\s+a\s+\d{2}-\d{2}(?:\s+\d{4})?\.(xlsx|xlsm|xls)$"
-  for nome in nomes:
+  for diretorio, nome in _listar_nomes_entrada():
     if re.fullmatch(padrao, nome, flags=re.IGNORECASE):
       encontrados.append(os.path.join(diretorio, nome))
   return sorted(encontrados, key=lambda x: os.path.basename(x).lower())
@@ -169,16 +196,11 @@ ARQUIVO_CONTROLE_JORNADA = os.path.join(DATA_DIR, "controle_jornada.csv")
 # é usado somente para uma migração inicial, quando ainda não existirem os arquivos
 # históricos internos.
 PADRAO_ABASTECIMENTOS_MENSAL = r"abastecimentos[_\s-]?(\d{2})[_-]?(\d{4})\.(xlsx|xlsm|xls)$"
-ARQUIVO_ABASTECIMENTOS_LEGADO = os.path.join(DATA_DIR, "uah_abastecimentos_3.xlsx")
+ARQUIVO_ABASTECIMENTOS_LEGADO = _caminho_entrada("uah_abastecimentos_3.xlsx")
 
 def _listar_arquivos_abastecimentos_mensais():
-  diretorio = DATA_DIR if DATA_DIR and DATA_DIR != "." else "."
-  try:
-    nomes = os.listdir(diretorio)
-  except OSError:
-    return []
   encontrados = []
-  for nome in nomes:
+  for diretorio, nome in _listar_nomes_entrada():
     m = re.fullmatch(PADRAO_ABASTECIMENTOS_MENSAL, nome, flags=re.IGNORECASE)
     if m:
       encontrados.append((int(m.group(1)), int(m.group(2)), os.path.join(diretorio, nome)))
@@ -550,6 +572,8 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
+_VERSAO_BACKUP = "v8"
+
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
 _DIRS_IGNORADOS = {"backups", "__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build"}
@@ -679,7 +703,8 @@ class _RemotoGitHub:
     def _req(self, metodo, caminho, corpo=None, raw=False):
         import urllib.request, urllib.error
         dados = _json.dumps(corpo).encode("utf-8") if corpo is not None else None
-        url = caminho if caminho.startswith("https://") else f"https://api.github.com/repos/{self.repo}/{caminho}"
+        base_repo = f"https://api.github.com/repos/{self.repo}"
+        url = caminho if caminho.startswith("https://") else (f"{base_repo}/{caminho}" if caminho else base_repo)
         req = urllib.request.Request(url, data=dados, method=metodo)
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Accept", "application/vnd.github.raw" if raw else "application/vnd.github+json")
@@ -5428,7 +5453,7 @@ if is_admin:
             else:
                 st.warning("🟡 Backup externo não configurado")
 
-        st.caption(f"Pasta de dados atual: {data_abs}")
+        st.caption(f"Pasta de dados atual: {data_abs} · Módulo de backup: {_VERSAO_BACKUP}")
         if not rs["ativo"]:
             st.warning(
                 "Sem backup externo, os dados gravados no servidor podem ser perdidos quando a hospedagem "
