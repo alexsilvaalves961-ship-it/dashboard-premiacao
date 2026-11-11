@@ -679,7 +679,8 @@ class _RemotoGitHub:
     def _req(self, metodo, caminho, corpo=None, raw=False):
         import urllib.request, urllib.error
         dados = _json.dumps(corpo).encode("utf-8") if corpo is not None else None
-        req = urllib.request.Request(f"https://api.github.com/repos/{self.repo}/{caminho}", data=dados, method=metodo)
+        url = caminho if caminho.startswith("https://") else f"https://api.github.com/repos/{self.repo}/{caminho}"
+        req = urllib.request.Request(url, data=dados, method=metodo)
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Accept", "application/vnd.github.raw" if raw else "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
@@ -747,7 +748,24 @@ class _RemotoGitHub:
         if status == 403:
             return False, "403 – o token não tem permissão neste repositório (ou foi bloqueado pela organização)."
         if status == 404:
-            return False, "404 – repositório não encontrado. Confira GITHUB_REPO (usuario/repositorio) e se o token foi liberado para ele."
+            dono = "?"
+            acessiveis = []
+            try:
+                su, ru = self._req("GET", "https://api.github.com/user")
+                if su == 200:
+                    dono = _json.loads(ru).get("login", "?")
+                sr, rr = self._req("GET", "https://api.github.com/user/repos?per_page=50")
+                if sr == 200:
+                    acessiveis = [x.get("full_name", "") for x in _json.loads(rr)]
+            except Exception:
+                pass
+            lista = ", ".join(acessiveis) if acessiveis else "nenhum"
+            return False, (
+                f"404 – o token NÃO enxerga o repositório “{self.repo}”. "
+                f"Token pertence à conta: {dono}. Repositórios que o token enxerga: {lista}. "
+                "Se o repositório não está nessa lista, edite o token (Repository access → Only select repositories) "
+                "e selecione-o; se o nome da lista for diferente, copie exatamente esse nome para GITHUB_REPO."
+            )
         if status != 200:
             return False, f"Resposta inesperada do GitHub: {status}"
         info = _json.loads(resp)
