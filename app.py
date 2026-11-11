@@ -555,16 +555,20 @@ _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.t
 _DIRS_IGNORADOS = {"backups", "__pycache__", "node_modules", "venv", "env", "site-packages", "dist", "build"}
 
 
+def _limpa_cfg(valor):
+    return str(valor).strip().strip("\"'").strip().replace("\r", "").replace("\n", "")
+
+
 def _cfg(nome, padrao=""):
-    valor = os.getenv(nome)
-    if valor:
-        return str(valor).strip()
     try:
         valor = st.secrets.get(nome)
         if valor:
-            return str(valor).strip()
+            return _limpa_cfg(valor)
     except Exception:
         pass
+    valor = os.getenv(nome)
+    if valor:
+        return _limpa_cfg(valor)
     return padrao
 
 
@@ -735,6 +739,28 @@ class _RemotoGitHub:
         if sha:
             self._req("DELETE", f"contents/{quote(key)}", {"message": f"remove: {key}", "sha": sha, "branch": self.branch})
 
+    def testar(self):
+        from urllib.parse import quote
+        status, resp = self._req("GET", "")
+        if status == 401:
+            return False, "401 – o GitHub recusou o token (inválido, incompleto, expirado ou revogado). Gere outro e cole inteiro."
+        if status == 403:
+            return False, "403 – o token não tem permissão neste repositório (ou foi bloqueado pela organização)."
+        if status == 404:
+            return False, "404 – repositório não encontrado. Confira GITHUB_REPO (usuario/repositorio) e se o token foi liberado para ele."
+        if status != 200:
+            return False, f"Resposta inesperada do GitHub: {status}"
+        info = _json.loads(resp)
+        st_b, _ = self._req("GET", f"branches/{quote(self.branch)}")
+        if st_b == 404:
+            return False, f"Repositório OK, mas o branch '{self.branch}' não existe. Ajuste GITHUB_BRANCH."
+        if not info.get("private", True):
+            return False, "ATENÇÃO: o repositório é PÚBLICO. Torne-o privado antes de salvar dados."
+        perm = info.get("permissions")
+        if isinstance(perm, dict) and not perm.get("push", True):
+            return False, "Conectou, mas o token só tem leitura. Ative Contents: Read and write."
+        return True, "Conexão OK: repositório privado encontrado e token com acesso."
+
 
 @st.cache_resource(show_spinner=False)
 def _estado_remoto():
@@ -752,6 +778,8 @@ def _assinatura_cfg_remoto():
 @st.cache_resource(show_spinner=False)
 def _remoto_cliente_build(_assinatura):
     est = _estado_remoto()
+    est["erro"] = None
+    est["config_erro"] = None
     modo = _cfg("BACKUP_REMOTE").lower()
     if not modo and _cfg("S3_BUCKET"):
         modo = "s3"
@@ -795,6 +823,26 @@ def remoto_status():
     r = _remoto_cliente()
     return {"ativo": r is not None, "modo": getattr(r, "modo", ""), "erro": est.get("erro") or est.get("config_erro"),
             "ultimo_ok": est.get("ultimo_ok")}
+
+
+def remoto_testar_conexao():
+    r = _remoto_cliente()
+    if r is None:
+        return False, "Backup externo não configurado."
+    try:
+        if hasattr(r, "testar"):
+            ok, msg = r.testar()
+        else:
+            r.list(f"{_prefixo_remoto()}/dados/")
+            ok, msg = True, "Conexão OK."
+        if ok:
+            _marcar_ok()
+        else:
+            _estado_remoto()["erro"] = msg
+        return ok, msg
+    except Exception as exc:
+        _marcar_erro(exc)
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def remoto_enviar_arquivo(caminho):
@@ -5384,6 +5432,13 @@ if is_admin:
                 st.caption(f"☁️ Última sincronização com sucesso: {rs['ultimo_ok']}")
 
             st.markdown("#### ☁️ Backup externo")
+            if rs["modo"].startswith("GitHub"):
+                _tok = _cfg("GITHUB_TOKEN")
+                st.caption(f"Token lido: {len(_tok)} caracteres, começa com “{_tok[:11]}”. "
+                           "Um token de granularidade fina costuma ter cerca de 90 caracteres e começar com github_pat_.")
+            if st.button("🔌 Testar conexão", key="remoto_testar", use_container_width=True):
+                _ok, _msg = remoto_testar_conexao()
+                (st.success if _ok else st.error)(_msg)
             e1, e2, e3 = st.columns(3)
             with e1:
                 if st.button("☁️ Enviar tudo agora", key="remoto_enviar_tudo", use_container_width=True):
