@@ -111,7 +111,7 @@ def _extrair_periodo_nome_velocidade(nome_arquivo):
     return None
   return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
 
-def carregar_excesso_velocidade_automatico(dt_ini, dt_fim):
+def _carregar_excesso_velocidade_automatico_raw(dt_ini, dt_fim):
   """Lê o extrato mensal correspondente à competência selecionada.
 
   A planilha possui a aba 'Geral' com Motorista, Filial e Picos de Velocidade.
@@ -276,6 +276,35 @@ def _normalizar_base_abastecimentos_raw(df, mapa_frota):
 def _colunas_historico_abastecimentos():
   return ["ID_ABASTECIMENTO","_ORDEM_ORIGINAL","PLACA_PADRONIZADA","KM_ATUAL_NUM","QTDE_NUM","VALOR_NUM","CONDUTOR_NORMALIZADO","DATA_FILTRO","DATA_NUM","DATA","DATA_HORA_ABASTECIMENTO","TIPO","REGISTRO_VALIDO","MOTORISTA_ABASTECIMENTO_ORIGINAL"]
 
+ARQUIVO_ASSINATURAS_IMPORT = os.path.join(DATA_DIR, "assinaturas_importacao.json")
+
+def _assinatura_arquivo(caminho, extra=""):
+  h = hashlib.md5()
+  with open(caminho, "rb") as f:
+    for bloco in iter(lambda: f.read(1 << 20), b""):
+      h.update(bloco)
+  h.update(str(extra).encode("utf-8"))
+  return h.hexdigest()
+
+def _carregar_assinaturas():
+  try:
+    with open(ARQUIVO_ASSINATURAS_IMPORT, "r", encoding="utf-8") as f:
+      d = _json.load(f)
+    return d if isinstance(d, dict) else {}
+  except Exception:
+    return {}
+
+def _salvar_assinaturas(d):
+  try:
+    garantir_diretorio()
+    tmp = ARQUIVO_ASSINATURAS_IMPORT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+      _json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, ARQUIVO_ASSINATURAS_IMPORT)
+    remoto_enviar_arquivo(ARQUIVO_ASSINATURAS_IMPORT)
+  except Exception as exc:
+    print(f"Aviso: não foi possível salvar assinaturas de importação: {exc}")
+
 def _arquivar_abastecimentos_mensais(mapa_frota):
   """Importa cada arquivo mensal para um histórico por competência.
 
@@ -289,10 +318,21 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
   """
   garantir_diretorio()
   cols = _colunas_historico_abastecimentos()
+  # Só reprocessa uma planilha quando ela (ou o cadastro de frota) mudou: evita reler Excel e regravar CSV a cada clique.
+  assin = _carregar_assinaturas(); novas = dict(assin); mudou = False
+  try:
+    frota_sig = hashlib.md5(repr(sorted((str(k), str(v)) for k, v in mapa_frota.items())).encode("utf-8")).hexdigest()
+  except Exception:
+    frota_sig = ""
 
   # Primeiro, processa os arquivos mensais presentes.
   mensal_processados = set()
   for mm, yyyy, caminho in _listar_arquivos_abastecimentos_mensais():
+    _chave_ass = os.path.basename(caminho)
+    _sig = _assinatura_arquivo(caminho, frota_sig)
+    if assin.get(_chave_ass) == _sig and os.path.exists(_arquivo_historico_abastecimentos(mm, yyyy)):
+      mensal_processados.add((mm, yyyy))
+      continue
     raw = _ler_planilha_abastecimentos_generica(caminho)
     norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
     if norm.empty or "DATA_FILTRO" not in norm.columns:
@@ -321,9 +361,12 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
     # Fonte mensal substitui completamente o snapshot anterior da mesma competência.
     _salvar_csv_com_backup(part, arq)
     mensal_processados.add((mm, yyyy))
+    novas[_chave_ass] = _sig; mudou = True
 
   # Migração do legado somente para competências ainda sem histórico mensal.
-  if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO):
+  _sig_leg = _assinatura_arquivo(ARQUIVO_ABASTECIMENTOS_LEGADO, frota_sig) if os.path.exists(ARQUIVO_ABASTECIMENTOS_LEGADO) else ""
+  if _sig_leg and assin.get("__legado__") != _sig_leg:
+    novas["__legado__"] = _sig_leg; mudou = True
     raw = _ler_planilha_abastecimentos_generica(ARQUIVO_ABASTECIMENTOS_LEGADO)
     norm = _normalizar_base_abastecimentos_raw(raw, mapa_frota)
     if not norm.empty and "DATA_FILTRO" in norm.columns:
@@ -357,6 +400,8 @@ def _arquivar_abastecimentos_mensais(mapa_frota):
             if c not in part.columns:
               part[c] = ""
           _salvar_csv_com_backup(part[cols], arq)
+  if mudou:
+    _salvar_assinaturas(novas)
 
 def _carregar_historico_abastecimentos_total():
   registros=[]
@@ -580,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v11"
+_VERSAO_BACKUP = "v12"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4458,7 +4503,51 @@ datas_validas = abastecimentos["DATA_FILTRO"].dropna() if "DATA_FILTRO" in abast
 min_dt = datas_validas.min().date() if not datas_validas.empty else date(2026,1,1)
 max_dt = datas_validas.max().date() if not datas_validas.empty else date(2026,12,31)
 
+def _token_dados_app():
+    """Assinatura dos arquivos de dados gravados pelo app: muda só quando alguém lança/edita algo."""
+    saida = []
+    try:
+        for root, dirs, files in os.walk(DATA_DIR):
+            dirs[:] = [d for d in dirs if d not in ("backups", "__pycache__") and not d.startswith(".")]
+            for n in files:
+                if n in ("temas_usuarios.json",) or n.endswith(".tmp"):
+                    continue
+                if os.path.splitext(n)[1].lower() in (".csv", ".json", ".parquet"):
+                    e = os.stat(os.path.join(root, n))
+                    saida.append((n, e.st_mtime_ns, e.st_size))
+    except OSError:
+        pass
+    return tuple(sorted(saida))
+
+def _copiar_res(x):
+    if isinstance(x, pd.DataFrame):
+        return x.copy()
+    if isinstance(x, (tuple, list)):
+        return type(x)(_copiar_res(i) for i in x)
+    return x
+
+def _memo(chave, fn):
+    memo = getattr(_PERSIST, "memo", None)
+    if memo is None:
+        memo = _PERSIST.memo = {}
+    if chave in memo:
+        return _copiar_res(memo[chave])
+    val = fn()
+    if len(memo) >= 12:
+        memo.pop(next(iter(memo)))
+    memo[chave] = val
+    return _copiar_res(val)
+
+def carregar_excesso_velocidade_automatico(dt_ini, dt_fim, *a, **k):
+    chave = ("vel", str(dt_ini), str(dt_fim), _token_arquivos_velocidade(), _token_dados_app())
+    return _memo(chave, lambda: _carregar_excesso_velocidade_automatico_raw(dt_ini, dt_fim, *a, **k))
+
 def aplicar_filtros_st(dt_ini, dt_fim, motorista, placa, categoria, filial):
+    chave = ("filtros", str(dt_ini), str(dt_fim), motorista, placa, categoria, filial,
+             bool(is_admin), str(FILIAL_ACESSO), _CACHE_BASE_TOKEN, _token_dados_app())
+    return _memo(chave, lambda: _aplicar_filtros_st_raw(dt_ini, dt_fim, motorista, placa, categoria, filial))
+
+def _aplicar_filtros_st_raw(dt_ini, dt_fim, motorista, placa, categoria, filial):
     if not is_admin and FILIAL_ACESSO not in ("", "TODAS"):
         filial = FILIAL_ACESSO
     di = dt_ini.strftime('%d/%m/%Y') if isinstance(dt_ini, date) else str(dt_ini)
