@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v12"
+_VERSAO_BACKUP = "v14"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4481,8 +4481,268 @@ def carregar_base(cache_token=None):
     eventos = engine.calcular_eventos_consumo(abastecimentos)
     return config, loader, engine, precos, frota, mapa_frota, abastecimentos, eventos
 
+# ================================================================
+# VALIDAÇÃO MANUAL DE ABASTECIMENTOS (motoristas com mais de uma placa)
+# ================================================================
+ARQUIVO_VALIDACOES = os.path.join(DATA_DIR, "validacoes_abastecimentos.csv")
+ARQUIVO_CONFIG_VALIDACAO = os.path.join(DATA_DIR, "config_validacao.json")
+COLUNAS_VALIDACOES = ["ID_ABASTECIMENTO", "MOTORISTA_VALIDADO", "MOTORISTA_ORIGINAL", "USUARIO", "DATA_VALIDACAO"]
+
+
+def _inicio_competencia(d):
+    d = pd.Timestamp(d).normalize()
+    ini = d.replace(day=26) if d.day >= 26 else (d - pd.DateOffset(months=1)).replace(day=26)
+    return ini.date()
+
+
+def carregar_validacoes_abastecimentos():
+    try:
+        df = pd.read_csv(ARQUIVO_VALIDACOES, dtype=str, encoding="utf-8-sig").fillna("")
+    except Exception:
+        df = pd.DataFrame(columns=COLUNAS_VALIDACOES)
+    for c in COLUNAS_VALIDACOES:
+        if c not in df.columns:
+            df[c] = ""
+    return df[COLUNAS_VALIDACOES]
+
+
+def _ler_config_validacao():
+    try:
+        with open(ARQUIVO_CONFIG_VALIDACAO, "r", encoding="utf-8") as f:
+            d = _json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return None
+
+
+def salvar_exigencia_validacao(data_ini, escopo=None):
+    try:
+        garantir_diretorio()
+        esc = escopo or (_ler_config_validacao() or {}).get("escopo") or "TODOS"
+        with open(ARQUIVO_CONFIG_VALIDACAO, "w", encoding="utf-8") as f:
+            _json.dump({"exigir_a_partir": (pd.Timestamp(data_ini).strftime("%Y-%m-%d") if data_ini else None),
+                        "escopo": esc}, f)
+        remoto_enviar_arquivo(ARQUIVO_CONFIG_VALIDACAO)
+    except Exception as exc:
+        print(f"Aviso: não foi possível salvar a regra de validação: {exc}")
+
+
+def carregar_exigencia_validacao():
+    """Data a partir da qual a validação é obrigatória (None = desligada). Padrão: início da competência atual."""
+    if not os.path.exists(ARQUIVO_CONFIG_VALIDACAO):
+        padrao = _inicio_competencia(date.today())
+        salvar_exigencia_validacao(padrao, "TODOS")
+        return padrao
+    cfg = _ler_config_validacao()
+    if cfg is None:
+        return None
+    try:
+        v = cfg.get("exigir_a_partir")
+        return pd.Timestamp(v).date() if v else None
+    except Exception:
+        return None
+
+
+def carregar_escopo_validacao():
+    cfg = _ler_config_validacao() or {}
+    return "MULTIPLAS" if str(cfg.get("escopo", "TODOS")).upper().startswith("MULT") else "TODOS"
+
+
+def aplicar_validacoes_manuais(ab, ev):
+    """Aplica as validações lançadas: troca de motorista e exclusão do prêmio dos abastecimentos ainda pendentes."""
+    if ab is None or ab.empty or "ID_ABASTECIMENTO" not in ab.columns:
+        return ab, ev
+    col_dt = "DATA_FILTRO" if "DATA_FILTRO" in ab.columns else ("DATA_NUM" if "DATA_NUM" in ab.columns else None)
+    if col_dt is None or "CONDUTOR_NORMALIZADO" not in ab.columns or "PLACA_PADRONIZADA" not in ab.columns:
+        return ab, ev
+    ab = ab.copy()
+    if "STATUS_VALIDACAO_VIAGEM" in ab.columns:
+        ab["CONCILIACAO_VIAGENS"] = ab["STATUS_VALIDACAO_VIAGEM"]
+    datas = pd.to_datetime(ab[col_dt], errors="coerce").dt.normalize()
+    comp = datas.dt.year * 12 + datas.dt.month + (datas.dt.day >= 26).astype(int)
+    mot0 = ab["CONDUTOR_NORMALIZADO"].fillna("").astype(str)
+    chave = pd.DataFrame({"c": comp, "m": mot0, "p": ab["PLACA_PADRONIZADA"].fillna("").astype(str)})
+    nplacas = chave.groupby(["c", "m"])["p"].transform("nunique")
+    multi = (nplacas > 1) & (mot0.str.strip() != "") & datas.notna()
+    ini_exig = carregar_exigencia_validacao()
+    if ini_exig:
+        alvo = multi if carregar_escopo_validacao() == "MULTIPLAS" else datas.notna()
+        exige = alvo & (datas >= pd.Timestamp(ini_exig))
+    else:
+        exige = pd.Series(False, index=ab.index)
+
+    vdf = carregar_validacoes_abastecimentos()
+    vmap = {str(i): str(m) for i, m in zip(vdf["ID_ABASTECIMENTO"], vdf["MOTORISTA_VALIDADO"]) if str(m).strip()}
+    ids = ab["ID_ABASTECIMENTO"].fillna("").astype(str)
+    validado = ids.isin(vmap)
+    novo = ids.map(vmap)
+    novo_norm = novo.fillna("").apply(DataUtils.normalizar_texto)
+    mudou = validado & (novo_norm != mot0)
+    status = pd.Series(np.where(validado, np.where(mudou, "CORRIGIDO", "VALIDADO"), np.where(exige, "PENDENTE", "")), index=ab.index)
+
+    ab["MULTI_PLACA"] = multi.astype(bool)
+    ab["EXIGE_VALIDACAO"] = exige.astype(bool)
+    ab["STATUS_VALIDACAO_MANUAL"] = status
+    if "MOTORISTA_CONSIDERADO" not in ab.columns:
+        ab["MOTORISTA_CONSIDERADO"] = mot0
+    ab.loc[validado, "MOTORISTA_CONSIDERADO"] = novo[validado]
+    ab.loc[validado, "CONDUTOR_NORMALIZADO"] = novo_norm[validado]
+    rot = {"VALIDADO": "VALIDADO MANUALMENTE", "CORRIGIDO": "CORRIGIDO MANUALMENTE",
+           "PENDENTE": "PENDENTE DE VALIDAÇÃO — MÚLTIPLAS PLACAS"}
+    if "STATUS_VALIDACAO_VIAGEM" in ab.columns:
+        m_ = status.isin(list(rot))
+        ab.loc[m_, "STATUS_VALIDACAO_VIAGEM"] = status[m_].map(rot)
+
+    if ev is not None and not ev.empty and "ID_ABASTECIMENTO" in ev.columns:
+        ev = ev.copy()
+        eids = ev["ID_ABASTECIMENTO"].fillna("").astype(str)
+        ev_val = eids.isin(vmap)
+        if ev_val.any():
+            n_ = eids.map(vmap)
+            ev.loc[ev_val, "CONDUTOR_NORMALIZADO"] = n_[ev_val].fillna("").apply(DataUtils.normalizar_texto)
+            if "MOTORISTA_CONSIDERADO" in ev.columns:
+                ev.loc[ev_val, "MOTORISTA_CONSIDERADO"] = n_[ev_val]
+        pend = set(ids[status == "PENDENTE"])
+        if pend:
+            ev = ev[~eids.isin(pend)].copy()
+    return ab, ev
+
+
+def _view_validacao(df, col_motor):
+    mot = df["MOTORISTA_CONSIDERADO"].fillna("").astype(str).replace({"": None})
+    return pd.DataFrame({
+        "ID": df["ID_ABASTECIMENTO"].astype(str).values,
+        "VALIDAR": df["STATUS_VALIDACAO_MANUAL"].isin(["VALIDADO", "CORRIGIDO"]).values,
+        "DATA": pd.to_datetime(df["DATA_FILTRO"], errors="coerce").dt.strftime("%d/%m/%Y").values,
+        "PLACA": df["PLACA_PADRONIZADA"].astype(str).values,
+        "ORIGINAL NA PLANILHA": df.get("MOTORISTA_ABASTECIMENTO_ORIGINAL", df["CONDUTOR_NORMALIZADO"]).astype(str).values,
+        "CONCILIAÇÃO (VIAGENS)": df.get("CONCILIACAO_VIAGENS", pd.Series("", index=df.index)).astype(str).values,
+        col_motor: mot.values,
+        "LITROS": pd.to_numeric(df.get("QTDE_NUM"), errors="coerce").values,
+        "KM": pd.to_numeric(df.get("KM_ATUAL_NUM"), errors="coerce").values,
+        "VALOR": pd.to_numeric(df.get("VALOR_NUM"), errors="coerce").values,
+        "STATUS": df["STATUS_VALIDACAO_MANUAL"].replace({"": "—"}).values,
+    })
+
+
+def _render_validacao_abastecimentos(dt_ini, dt_fim):
+    import math
+    st.markdown("### ✅ Validação dos abastecimentos")
+    st.caption("Confira se cada abastecimento está com o motorista correto. Se precisar, troque em “Motorista considerado” e marque "
+               "“Validar”. Abastecimentos que ainda não foram validados ficam FORA do prêmio.")
+    ab = abastecimentos
+    if ab is None or ab.empty or "STATUS_VALIDACAO_MANUAL" not in ab.columns:
+        st.info("Não há abastecimentos para validar.")
+        return
+    ini_exig = carregar_exigencia_validacao()
+    escopo = carregar_escopo_validacao()
+    with st.expander("⚙️ Regra de exigência da validação"):
+        ligado = st.checkbox("Exigir validação", value=ini_exig is not None, key="val_exigir", disabled=not is_admin)
+        data_exig = st.date_input("Exigir a partir de", value=ini_exig or _inicio_competencia(date.today()),
+                                  key="val_exigir_data", disabled=not is_admin)
+        esc_lbl = st.radio("Quais abastecimentos precisam de validação",
+                           ["Todos os abastecimentos", "Somente motoristas com mais de uma placa"],
+                           index=0 if escopo == "TODOS" else 1, key="val_escopo", disabled=not is_admin)
+        st.caption("Competências anteriores à data escolhida não são afetadas (já foram pagas).")
+        if st.button("Salvar regra", key="val_exigir_salvar", disabled=not is_admin):
+            salvar_exigencia_validacao(data_exig if ligado else None, "TODOS" if esc_lbl.startswith("Todos") else "MULTIPLAS")
+            st.rerun()
+
+    datas = pd.to_datetime(ab["DATA_FILTRO"], errors="coerce").dt.normalize()
+    m_base = (datas >= pd.Timestamp(dt_ini)) & (datas <= pd.Timestamp(dt_fim))
+    if escopo == "MULTIPLAS":
+        m_base &= ab["MULTI_PLACA"]
+    sub_all = ab.loc[m_base].copy()
+    if sub_all.empty:
+        st.success("Nenhum abastecimento a validar nesta competência.")
+        return
+    stt = sub_all["STATUS_VALIDACAO_MANUAL"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Abastecimentos", len(sub_all))
+    c2.metric("Pendentes", int((stt == "PENDENTE").sum()))
+    c3.metric("Validados", int((stt == "VALIDADO").sum()))
+    c4.metric("Corrigidos (motorista trocado)", int((stt == "CORRIGIDO").sum()))
+    if int((stt == "PENDENTE").sum()):
+        st.warning("Abastecimentos pendentes ainda NÃO estão compondo o prêmio dos motoristas.")
+
+    fa, fb, fc = st.columns(3)
+    mots = sorted(sub_all["CONDUTOR_NORMALIZADO"].dropna().astype(str).replace({"": "(SEM MOTORISTA)"}).unique().tolist())
+    mot_sel = fa.selectbox("Motorista", ["TODOS"] + mots, key="val_mot")
+    placa_sel = fb.text_input("Placa", key="val_placa")
+    st_sel = fc.selectbox("Mostrar", ["Pendentes", "Todos", "Validados / corrigidos"], key="val_status")
+    sub = sub_all
+    if mot_sel != "TODOS":
+        sub = sub[sub["CONDUTOR_NORMALIZADO"].astype(str).replace({"": "(SEM MOTORISTA)"}) == mot_sel]
+    if placa_sel.strip():
+        sub = sub[sub["PLACA_PADRONIZADA"].astype(str).str.contains(placa_sel.strip().upper().replace("-", ""), na=False)]
+    if st_sel == "Pendentes":
+        sub = sub[sub["STATUS_VALIDACAO_MANUAL"] == "PENDENTE"]
+    elif st_sel == "Validados / corrigidos":
+        sub = sub[sub["STATUS_VALIDACAO_MANUAL"].isin(["VALIDADO", "CORRIGIDO"])]
+    if sub.empty:
+        st.info("Nada a mostrar com esses filtros.")
+        return
+    sub = sub.sort_values(["CONDUTOR_NORMALIZADO", "DATA_FILTRO"])
+    por_pag = 150
+    n_pag = max(1, math.ceil(len(sub) / por_pag))
+    pagina = int(st.number_input(f"Página (de {n_pag}) — {len(sub)} abastecimento(s)", min_value=1, max_value=n_pag, value=1, step=1, key="val_pag")) if n_pag > 1 else 1
+    page = sub.iloc[(pagina - 1) * por_pag: pagina * por_pag]
+
+    nomes = set(sub_all["MOTORISTA_CONSIDERADO"].fillna("").astype(str))
+    try:
+        nomes |= set(cadastro["MOTORISTA_CADASTRO"].dropna().astype(str))
+    except Exception:
+        pass
+    opcoes = sorted(n for n in nomes if n.strip())
+    col_motor = "MOTORISTA CONSIDERADO"
+    view = _view_validacao(page, col_motor)
+    edited = st.data_editor(
+        view, hide_index=True, use_container_width=True, num_rows="fixed",
+        key=f"val_editor_{mot_sel}_{placa_sel}_{st_sel}_{pagina}_{len(view)}",
+        disabled=[c for c in view.columns if c not in ("VALIDAR", col_motor)] if is_admin else list(view.columns),
+        column_config={"ID": None,
+                       "VALIDAR": st.column_config.CheckboxColumn("Validar", help="Marque para validar este abastecimento"),
+                       col_motor: st.column_config.SelectboxColumn("Motorista considerado", options=opcoes, required=False)},
+    )
+    if not is_admin:
+        st.info("Somente o administrador pode validar ou trocar o motorista.")
+        return
+    b1, b2 = st.columns(2)
+    salvar = b1.button("💾 Salvar validações marcadas (esta página)", key="val_salvar", use_container_width=True)
+    todos = b2.button(f"✔️ Validar TODOS os {len(sub)} filtrados (como estão)", key="val_todos", use_container_width=True)
+    if salvar or todos:
+        orig = dict(zip(view["ID"], view["VALIDAR"]))
+        if todos:
+            ed = _view_validacao(sub, col_motor)
+            ed["VALIDAR"] = True
+            trocas = dict(zip(edited["ID"].astype(str), edited[col_motor]))
+            ed[col_motor] = [trocas.get(i, m) for i, m in zip(ed["ID"], ed[col_motor])]
+            desmarcados = []
+        else:
+            ed = edited.copy()
+            desmarcados = [i for i in ed.loc[~ed["VALIDAR"], "ID"].astype(str) if orig.get(i, False)]
+        marcados = ed[ed["VALIDAR"]]
+        sem_mot = marcados[col_motor].isna() | (marcados[col_motor].astype(str).str.strip() == "")
+        if sem_mot.any():
+            st.warning(f"{int(sem_mot.sum())} abastecimento(s) sem motorista foram ignorados: escolha o motorista antes de validar.")
+            marcados = marcados[~sem_mot]
+        atual = carregar_validacoes_abastecimentos()
+        atual = atual[~atual["ID_ABASTECIMENTO"].isin(marcados["ID"].astype(str).tolist() + desmarcados)]
+        novas = pd.DataFrame({
+            "ID_ABASTECIMENTO": marcados["ID"].astype(str).values,
+            "MOTORISTA_VALIDADO": marcados[col_motor].astype(str).values,
+            "MOTORISTA_ORIGINAL": marcados["ORIGINAL NA PLANILHA"].astype(str).values,
+            "USUARIO": str(st.session_state.get("auth_usuario", "")),
+            "DATA_VALIDACAO": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        })
+        _salvar_csv_com_backup(pd.concat([atual, novas], ignore_index=True)[COLUNAS_VALIDACOES], ARQUIVO_VALIDACOES)
+        st.success(f"{len(novas)} validação(ões) salva(s); {len(desmarcados)} removida(s).")
+        st.rerun()
+
+
 config, loader, engine, precos, frota, mapa_frota, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
 cadastro = loader.carregar_cadastro_motoristas()  # leve: lido a cada execução, sem recarregar planilhas
+abastecimentos, eventos = aplicar_validacoes_manuais(abastecimentos, eventos)
 cadastro_all = cadastro.copy()
 
 # Restringe todo o aplicativo à filial vinculada ao usuário de consulta.
@@ -4782,7 +5042,7 @@ kpis=st.columns(6)
 for c,(lab,val) in zip(kpis,[("💰 Total em Prêmios",f_premio),("⛽ Gasto Combustível",f_gasto),("📍 KM Rodados",f_km),("🧪 Litros",f_litros),("🎯 Média KM/L",f_media),("👥 Motoristas",f_mots)]):
     c.markdown(kpi_html(lab,val),unsafe_allow_html=True)
 
-tab_labels=["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","🚚 Múltiplas Placas","🏷️ Categorias por Placa","⚙️ Cadastros","📄 Recibos","🏥 Ausências","🚨 Excesso de Velocidade","⏱️ Controle de Jornada","🚫 Desclassificações","👔 Relatório RH"]
+tab_labels=["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","✅ Validação e Múltiplas Placas","🏷️ Categorias por Placa","⚙️ Cadastros","📄 Recibos","🏥 Ausências","🚨 Excesso de Velocidade","⏱️ Controle de Jornada","🚫 Desclassificações","👔 Relatório RH"]
 if is_admin:
     tab_labels.append("🔐 Usuários")
     tab_labels.append("💾 Backup e Segurança")
@@ -5313,6 +5573,8 @@ if _ABA_ATIVA == 5:
         st.caption(f"Cadastro oficial: {cad_total} registros • {cad_ativos} ativos.")
 
 if _ABA_ATIVA == 3:
+    _render_validacao_abastecimentos(dt_ini, dt_fim)
+    st.markdown('---')
     st.subheader("Média separada por placa")
     st.dataframe(df_multi,use_container_width=True,hide_index=True)
 if _ABA_ATIVA == 4:
