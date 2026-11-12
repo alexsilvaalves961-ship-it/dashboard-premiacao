@@ -580,7 +580,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v10"
+_VERSAO_BACKUP = "v11"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4125,6 +4125,19 @@ section[data-testid="stSidebar"] .stButton>button,section[data-testid="stSidebar
 """
 
 _CSS_MODERNO = """
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] [role="radiogroup"],
+.element-container:has(.nav-marker) + .element-container [role="radiogroup"]{gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin-bottom:14px;}
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] label,
+.element-container:has(.nav-marker) + .element-container label{padding:11px 16px;margin:0;border-bottom:2px solid transparent;cursor:pointer;border-radius:0;}
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] label > div:first-child,
+.element-container:has(.nav-marker) + .element-container label > div:first-child{display:none;}
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] label p,
+.element-container:has(.nav-marker) + .element-container label p{color:var(--muted)!important;font-weight:650;font-size:.92rem;}
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] label:has(input:checked),
+.element-container:has(.nav-marker) + .element-container label:has(input:checked){border-bottom-color:var(--tab);}
+[data-testid="stElementContainer"]:has(.nav-marker) + [data-testid="stElementContainer"] label:has(input:checked) p,
+.element-container:has(.nav-marker) + .element-container label:has(input:checked) p{color:var(--tab)!important;font-weight:800;}
+
 .kpi{background:var(--surface)!important;border:1px solid var(--line)!important;border-radius:var(--radius);
   padding:16px 18px;min-height:98px;position:relative;overflow:hidden;box-shadow:var(--shadow);}
 .kpi:hover{border-color:var(--accent)!important;}
@@ -4577,11 +4590,43 @@ def gerar_competencias(min_data, max_data):
         cursor = (cursor + pd.DateOffset(months=1)).replace(day=26)
     return competencias
 
-competencias_disponiveis = gerar_competencias(min_dt, max_dt)
+def _hoje_brasil():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    except Exception:
+        return date.today()
+
+def _max_data_lancamentos():
+    """Maior data já lançada no sistema (ausências / desclassificações), para abrir a competência correspondente."""
+    mx = None
+    try:
+        for chave, cols in (("ausencias", ["DATA_INICIO", "DATA_FIM"]), ("desclassificacoes", ["DATA_EVENTO"])):
+            df_l = st.session_state.get(chave)
+            if df_l is None or len(df_l) == 0:
+                continue
+            for c in cols:
+                if c in df_l.columns:
+                    d = pd.to_datetime(df_l[c], dayfirst=True, errors="coerce").max()
+                    if pd.notna(d) and (mx is None or d.date() > mx):
+                        mx = d.date()
+    except Exception:
+        pass
+    return mx
+
+# A lista de competências não depende mais só dos abastecimentos importados: a competência em
+# andamento (pela data de hoje) e as que já têm lançamentos passam a existir automaticamente.
+_hoje = _hoje_brasil()
+_ref_max = max(max_dt, _hoje)
+_lanc = _max_data_lancamentos()
+if _lanc:
+    _ref_max = max(_ref_max, min(_lanc, (pd.Timestamp(_hoje) + pd.Timedelta(days=40)).date()))
+_ref_padrao = _hoje if _hoje >= min_dt else max_dt
+competencias_disponiveis = gerar_competencias(min_dt, _ref_max)
 competencias_labels = [c[0] for c in competencias_disponiveis]
 competencia_padrao = next(
     (label for label, ini_c, fim_c in competencias_disponiveis
-     if ini_c <= max_dt <= fim_c),
+     if ini_c <= _ref_padrao <= fim_c),
     competencias_labels[-1] if competencias_labels else ""
 )
 competencia_lookup = {label: (ini_c, fim_c) for label, ini_c, fim_c in competencias_disponiveis}
@@ -4652,9 +4697,13 @@ tab_labels=["📈 Dashboard Gráfico","📊 Resumo","⛽ Abastecimentos","🚚 M
 if is_admin:
     tab_labels.append("🔐 Usuários")
     tab_labels.append("💾 Backup e Segurança")
-tabs=st.tabs(tab_labels)
+if st.session_state.get("aba_ativa") not in tab_labels:
+    st.session_state["aba_ativa"] = tab_labels[0]
+st.markdown('<div class="nav-marker"></div>', unsafe_allow_html=True)
+st.radio("Seção", tab_labels, key="aba_ativa", horizontal=True, label_visibility="collapsed")
+_ABA_ATIVA = tab_labels.index(st.session_state["aba_ativa"])
 BACKUP_TAB_INDEX = len(tab_labels) - 1 if is_admin else None
-with tabs[0]:
+if _ABA_ATIVA == 0:
     st.markdown("### 📈 Visão Gerencial da Competência")
     st.caption(f"Período: {dt_ini.strftime('%d/%m/%Y')} → {dt_fim.strftime('%d/%m/%Y')} | Todos os gráficos acompanham os filtros da lateral.")
 
@@ -4706,7 +4755,7 @@ with tabs[0]:
         if ev:
             evdf=pd.DataFrame(ev,columns=["TIPO","VALOR"]).set_index("TIPO")
             barras_html("⚠️ Eventos dos Pilares","Ocorrências registradas na competência",evdf,_int,2)
-with tabs[1]:
+if _ABA_ATIVA == 1:
     st.subheader("📊 Resumo de Abastecimentos")
     st.caption(
         f"Visão consolidada dos abastecimentos da competência "
@@ -4846,7 +4895,7 @@ with tabs[1]:
             st.dataframe(exib, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum abastecimento encontrado para os filtros e a competência selecionada.")
-with tabs[5]:
+if _ABA_ATIVA == 5:
     st.subheader("Gestão de Cadastros")
     if not is_admin:
         st.info("Seu perfil é somente consulta. A gestão de cadastros é exclusiva do Administrador.")
@@ -5174,10 +5223,10 @@ with tabs[5]:
         cad_ativos = int((cadastro_all["STATUS"].fillna("ATIVO").astype(str).str.upper().eq("ATIVO")).sum()) if isinstance(cadastro_all, pd.DataFrame) and "STATUS" in cadastro_all.columns else cad_total
         st.caption(f"Cadastro oficial: {cad_total} registros • {cad_ativos} ativos.")
 
-with tabs[3]:
+if _ABA_ATIVA == 3:
     st.subheader("Média separada por placa")
     st.dataframe(df_multi,use_container_width=True,hide_index=True)
-with tabs[4]:
+if _ABA_ATIVA == 4:
     if is_admin:
         st.subheader("Categoria considerada para pagamento")
         st.caption("Defina a categoria de pagamento por motorista + placa. Os registros abaixo podem ser editados ou excluídos individualmente.")
@@ -5256,12 +5305,12 @@ with tabs[4]:
             if df_cat_view.empty: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
             else: st.dataframe(df_cat_view,use_container_width=True,hide_index=True)
         else: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
-with tabs[11]:
+if _ABA_ATIVA == 11:
     st.subheader("Relatório RH")
     st.caption("Relação de todos os motoristas ATIVOS no cadastro oficial. Férias, atestados ou ausência de abastecimento não retiram o motorista do RH; nesses casos o valor fica R$ 0,00.")
     st.caption(f"Motoristas ativos no cadastro: {len(rh_view)}")
     st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
-with tabs[2]:
+if _ABA_ATIVA == 2:
     st.subheader("Detalhamento dos Abastecimentos")
     st.caption("O motorista considerado no cálculo é conciliado pelo ciclo entre abastecimentos: KM anterior → viagens realizadas → KM do abastecimento atual. Se o ciclo envolver mais de um motorista, fica pendente para validação.")
     cols_auditoria = [
@@ -5276,7 +5325,7 @@ with tabs[2]:
         st.dataframe(det_view[cols_auditoria],use_container_width=True,hide_index=True)
     else:
         st.dataframe(det_view,use_container_width=True,hide_index=True)
-with tabs[6]:
+if _ABA_ATIVA == 6:
     st.subheader("Recibo de Premiação")
     rec_fil=st.selectbox("Filial",filiais_lista,key="rf")
     rec_mots=["TODOS OS MOTORISTAS (FILIAL AUTORIZADA)"]+sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not is_admin else ["TODOS OS MOTORISTAS (TODAS AS FILIAIS)"]+sorted(res_f["MOTORISTA"].dropna().unique().tolist()) if not res_f.empty else ["TODOS OS MOTORISTAS (TODAS AS FILIAIS)"]
@@ -5294,7 +5343,7 @@ with tabs[6]:
     if st.session_state.get("recibos_html_gerados"):
         recibos_render = str(st.session_state["recibos_html_gerados"])
         st.components.v1.html(recibos_render, height=980, scrolling=True)
-with tabs[7]:
+if _ABA_ATIVA == 7:
     if is_admin:
         st.subheader("Lançamento de Ausências")
         st.info("Competência: dia 26 até dia 25. O período é contado de forma inclusiva.")
@@ -5329,7 +5378,7 @@ with tabs[7]:
             st.dataframe(aus_exib,use_container_width=True,hide_index=True)
         else:
             st.info("Nenhuma ausência incide nesta competência.")
-with tabs[10]:
+if _ABA_ATIVA == 10:
     # Apenas lançamentos da competência selecionada afetam e aparecem como eventos ativos.
     df_descl_comp = filtrar_desclassificacoes_competencia(
         st.session_state.desclassificacoes, dt_ini, dt_fim
@@ -5493,7 +5542,7 @@ with tabs[10]:
         st.info("Os eventos exibidos e considerados pertencem somente à competência selecionada. Eventos de meses anteriores não permanecem ativos.")
         st.dataframe(df_descl_comp, use_container_width=True, hide_index=True)
 if is_admin:
-    with tabs[12]:
+    if _ABA_ATIVA == 12:
         st.subheader("🔐 Gestão de Usuários")
         st.caption("Cadastre usuários de consulta vinculados a uma única filial. Eles não poderão acessar dados de outras filiais nem alterar lançamentos.")
         usuarios_df = carregar_usuarios_acesso()
@@ -5552,7 +5601,7 @@ if is_admin:
                     st.rerun()
 
 if is_admin:
-    with tabs[BACKUP_TAB_INDEX]:
+    if _ABA_ATIVA == BACKUP_TAB_INDEX:
         st.subheader("💾 Backup e Segurança dos Dados")
         st.info(
             "Esta área protege os dados inseridos diretamente no aplicativo: cadastros, "
@@ -5713,7 +5762,7 @@ if is_admin:
 
 
 def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_excesso=False, df_automatico=None):
-    with tab:
+    if _ABA_ATIVA == tab:
         st.subheader(titulo)
         if not is_admin:
             st.info("Seu perfil tem acesso somente para consulta. Lançamento e exclusão de eventos são exclusivos do Administrador.")
@@ -5817,13 +5866,13 @@ def _render_eventos_pilar(tab, titulo, info, key_prefix, df_key, saver, is_exces
                     saver(st.session_state[df_key]); st.rerun()
 
 _render_eventos_pilar(
-    tabs[8], "🚨 Excesso de Velocidade",
+    8, "🚨 Excesso de Velocidade",
     "Até 30 eventos: desconto por evento. Mais de 30 eventos no período: perda integral do prêmio.",
     "excesso", "excesso_velocidade", salvar_excesso_velocidade, True,
     df_automatico=carregar_excesso_velocidade_automatico(dt_ini, dt_fim)
 )
 _render_eventos_pilar(
-    tabs[9], "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
+    9, "⏱️ Controle de Jornada - Macros e Intervalos Incorretos",
     "Cada evento desconta 1 ponto do prêmio. Com 130 eventos ou mais no período, o prêmio é perdido integralmente.",
     "jornada", "controle_jornada", salvar_controle_jornada, False
 )
