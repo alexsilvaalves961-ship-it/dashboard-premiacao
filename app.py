@@ -419,8 +419,17 @@ def garantir_diretorio():
 # ================================================================
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 BACKUP_RETENTION = 20
+import sys as _sys, types as _types, threading as _threading
+_PERSIST = _sys.modules.get("__premio_persist__")
+if _PERSIST is None:
+    _PERSIST = _types.ModuleType("__premio_persist__")
+    _PERSIST.estado = {"ultimo_ok": None, "erro": None, "ultimo_snapshot": 0.0, "config_erro": None}
+    _PERSIST.clientes = {}; _PERSIST.restaurado = set(); _PERSIST.auto_ts = 0.0
+    _PERSIST.pendentes = {}; _PERSIST.snap_pendente = False
+    _PERSIST.lock = _threading.Lock(); _PERSIST.thread = None
+    _sys.modules["__premio_persist__"] = _PERSIST
 _BACKUP_AUTO_LAST_TS = 0.0
-_BACKUP_AUTO_MIN_INTERVAL = 60.0  # um snapshot antes de uma sequência de gravações
+_BACKUP_AUTO_MIN_INTERVAL = 180.0  # um snapshot antes de uma sequência de gravações
 
 
 def _arquivos_de_dados_para_backup():
@@ -453,9 +462,8 @@ def _nome_backup(prefixo="backup"):
 
 def criar_backup_automatico(motivo="auto"):
     """Cria um snapshot local antes de uma gravação, sem interromper o salvamento."""
-    global _BACKUP_AUTO_LAST_TS
     agora = datetime.now().timestamp()
-    if agora - _BACKUP_AUTO_LAST_TS < _BACKUP_AUTO_MIN_INTERVAL:
+    if agora - _PERSIST.auto_ts < _BACKUP_AUTO_MIN_INTERVAL:
         return None
     try:
         garantir_diretorio()
@@ -475,7 +483,7 @@ def criar_backup_automatico(motivo="auto"):
                 zf.write(caminho, arcname=rel)
                 manifest.append(rel)
             zf.writestr("MANIFESTO.txt", "\n".join(manifest))
-        _BACKUP_AUTO_LAST_TS = agora
+        _PERSIST.auto_ts = agora
         _limpar_backups_antigos()
         return caminho_zip
     except Exception as exc:
@@ -572,7 +580,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v9"
+_VERSAO_BACKUP = "v10"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -805,9 +813,8 @@ class _RemotoGitHub:
         return True, "Conexão OK: repositório privado encontrado e token com acesso."
 
 
-@st.cache_resource(show_spinner=False)
 def _estado_remoto():
-    return {"ultimo_ok": None, "erro": None, "ultimo_snapshot": 0.0, "config_erro": None}
+    return _PERSIST.estado
 
 
 _NOMES_CFG_REMOTO = ["BACKUP_REMOTE", "S3_BUCKET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
@@ -818,8 +825,7 @@ def _assinatura_cfg_remoto():
     return hash(tuple(_cfg(n) for n in _NOMES_CFG_REMOTO))
 
 
-@st.cache_resource(show_spinner=False)
-def _remoto_cliente_build(_assinatura):
+def _remoto_cliente_criar(_assinatura):
     est = _estado_remoto()
     est["erro"] = None
     est["config_erro"] = None
@@ -840,6 +846,12 @@ def _remoto_cliente_build(_assinatura):
         est["config_erro"] = f"{type(exc).__name__}: {exc}"
         print(f"Backup externo indisponível: {est['config_erro']}")
     return None
+
+
+def _remoto_cliente_build(_assinatura):
+    if _assinatura not in _PERSIST.clientes:
+        _PERSIST.clientes[_assinatura] = _remoto_cliente_criar(_assinatura)
+    return _PERSIST.clientes[_assinatura]
 
 
 def _remoto_cliente():
@@ -888,7 +900,46 @@ def remoto_testar_conexao():
         return False, f"{type(exc).__name__}: {exc}"
 
 
-def remoto_enviar_arquivo(caminho):
+def _enviar_agora(r, pref, caminho, rel):
+    try:
+        with open(caminho, "rb") as f:
+            r.put(f"{pref}/dados/{rel}", f.read())
+        _marcar_ok()
+        return True
+    except Exception as exc:
+        _marcar_erro(exc)
+        return False
+
+
+def _worker_envio():
+    while True:
+        _time.sleep(1.5)  # agrupa várias gravações seguidas
+        with _PERSIST.lock:
+            itens = dict(_PERSIST.pendentes); _PERSIST.pendentes.clear()
+            snap = _PERSIST.snap_pendente; _PERSIST.snap_pendente = False
+            if not itens and not snap:
+                _PERSIST.thread = None
+                return
+        for caminho, (r, pref, rel) in itens.items():
+            if os.path.isfile(caminho):
+                _enviar_agora(r, pref, caminho, rel)
+        if snap:
+            try:
+                _remoto_snapshot_sync(False)
+            except Exception as exc:
+                _marcar_erro(exc)
+
+
+def _iniciar_worker():
+    with _PERSIST.lock:
+        if _PERSIST.thread is None or not _PERSIST.thread.is_alive():
+            t = _threading.Thread(target=_worker_envio, daemon=True)
+            _PERSIST.thread = t
+            t.start()
+
+
+def remoto_enviar_arquivo(caminho, sincrono=False):
+    """Envia ao backup externo. Por padrão em segundo plano (não trava a tela)."""
     r = _remoto_cliente()
     if r is None:
         return False
@@ -896,9 +947,12 @@ def remoto_enviar_arquivo(caminho):
         rel = _rel_dados(caminho)
         if rel is None or not os.path.isfile(caminho):
             return False
-        with open(caminho, "rb") as f:
-            r.put(f"{_prefixo_remoto()}/dados/{rel}", f.read())
-        _marcar_ok()
+        pref = _prefixo_remoto()
+        if sincrono:
+            return _enviar_agora(r, pref, caminho, rel)
+        with _PERSIST.lock:
+            _PERSIST.pendentes[caminho] = (r, pref, rel)
+        _iniciar_worker()
         return True
     except Exception as exc:
         _marcar_erro(exc)
@@ -908,12 +962,12 @@ def remoto_enviar_arquivo(caminho):
 def remoto_enviar_tudo():
     n = 0
     for caminho in _arquivos_de_dados_para_backup():
-        if remoto_enviar_arquivo(caminho):
+        if remoto_enviar_arquivo(caminho, sincrono=True):
             n += 1
     return n
 
 
-def remoto_snapshot(forcar=False):
+def _remoto_snapshot_sync(forcar=False):
     """Envia um .zip completo (histórico de versões). Limitado por intervalo, salvo se forçado."""
     r = _remoto_cliente()
     if r is None:
@@ -937,6 +991,18 @@ def remoto_snapshot(forcar=False):
     except Exception as exc:
         _marcar_erro(exc)
         return False
+
+
+def remoto_snapshot(forcar=False):
+    if forcar:
+        return _remoto_snapshot_sync(True)
+    r = _remoto_cliente()
+    if r is None or not getattr(r, "snapshots", True):
+        return False
+    with _PERSIST.lock:
+        _PERSIST.snap_pendente = True
+    _iniciar_worker()
+    return True
 
 
 def remoto_listar_snapshots():
@@ -1012,13 +1078,15 @@ def _pos_restauracao():
               "excesso_velocidade", "controle_jornada"]:
         st.session_state.pop(k, None)
     try:
-        st.cache_resource.clear()
+        carregar_base.clear()
     except Exception:
         pass
 
 
-@st.cache_resource(show_spinner="Restaurando dados do backup externo...")
 def _restaurar_na_inicializacao(_assinatura=None):
+    if _assinatura in _PERSIST.restaurado:
+        return 0
+    _PERSIST.restaurado.add(_assinatura)
     """Roda uma vez por processo: traz do espelho o que faltar e, se o espelho estiver vazio, semeia com os dados locais."""
     r = _remoto_cliente()
     if r is None:
@@ -3795,7 +3863,7 @@ def gerar_recibos_lote(
 
 
 
-st.set_page_config(page_title="Dashboard do Prêmio de Motoristas", page_icon="🚚", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="SISTEMA DE GERENCIAMENTO DE PREMIAÇÃO - TRANSPORTE", page_icon="🚚", layout="wide", initial_sidebar_state="expanded")
 
 # ================================================================
 # SISTEMA DE TEMAS VISUAIS (seletor estilo sistemas corporativos)
@@ -3970,7 +4038,7 @@ section[data-testid="stSidebar"] .side-periodo .sp-v{font-size:15px;font-weight:
   display:flex;align-items:center;justify-content:center;font-size:27px;
   box-shadow:0 6px 18px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.3);}
 .hero-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
-.stApp .hero h1{margin:0!important;padding:0!important;font-size:1.55rem;font-weight:850;
+.stApp .hero h1{margin:0!important;padding:0!important;font-size:1.3rem;font-weight:850;
   letter-spacing:-.5px;line-height:1.15;color:var(--hero-text);}
 .stApp .hero .hero-badge{display:inline-flex;align-items:center;gap:6px;font-size:.72rem;font-weight:800;
   padding:3px 10px;border-radius:999px;color:var(--hero-text);
@@ -4199,7 +4267,7 @@ def render_hero(dt_ini, dt_fim):
     filial_txt = _html.escape(str(st.session_state.get("auth_filial") or "TODAS"))
     hero = (
         "<div class='hero'><div class='logo-bar'><div class='logo'>🚚</div><div>"
-        "<div class='hero-title'><h1>Dashboard do Prêmio de Motoristas</h1>"
+        "<div class='hero-title'><h1>SISTEMA DE GERENCIAMENTO DE PREMIAÇÃO - TRANSPORTE</h1>"
         f"<span class='hero-badge'>● Competência {dt_fim.strftime('%m/%Y')}</span></div>"
         "<div class='hero-meta'>"
         f"<span class='chip'>📅 Período analisado <b>{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}</b></span>"
@@ -4286,7 +4354,7 @@ if "auth_nome" not in st.session_state: st.session_state.auth_nome = ""
 if not st.session_state.auth_ok:
     garantir_usuarios_iniciais()
     injetar_tema()
-    st.markdown("<div class='login-shell'><div class='login-brand'><div style='font-size:34px;'>🚚</div><h1>Dashboard do Prêmio de Motoristas</h1><p>Acesso protegido por login</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='login-shell'><div class='login-brand'><div style='font-size:34px;'>🚚</div><h1>SISTEMA DE GERENCIAMENTO DE PREMIAÇÃO - TRANSPORTE</h1><p>Acesso protegido por login</p></div>", unsafe_allow_html=True)
     usuario_login = st.text_input("👤 Usuário", placeholder="Digite seu usuário")
     senha_login = st.text_input("🔒 Senha", type="password", placeholder="Digite sua senha")
     if st.button("🔐 Entrar", type="primary", use_container_width=True):
@@ -4346,7 +4414,6 @@ def carregar_base(cache_token=None):
     loader = DataLoader(config); engine = RewardEngine()
     precos = loader.carregar_precos()
     frota, mapa_frota = loader.carregar_frota()
-    cadastro = loader.carregar_cadastro_motoristas()
     _arquivar_abastecimentos_mensais(mapa_frota)
     abastecimentos = _carregar_historico_abastecimentos_total()
     if abastecimentos.empty:
@@ -4354,9 +4421,10 @@ def carregar_base(cache_token=None):
     viagens = loader.carregar_viagens()
     abastecimentos = associar_motorista_viagem(abastecimentos, viagens)
     eventos = engine.calcular_eventos_consumo(abastecimentos)
-    return config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos
+    return config, loader, engine, precos, frota, mapa_frota, abastecimentos, eventos
 
-config, loader, engine, precos, frota, mapa_frota, cadastro, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
+config, loader, engine, precos, frota, mapa_frota, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
+cadastro = loader.carregar_cadastro_motoristas()  # leve: lido a cada execução, sem recarregar planilhas
 cadastro_all = cadastro.copy()
 
 # Restringe todo o aplicativo à filial vinculada ao usuário de consulta.
@@ -4815,7 +4883,7 @@ with tabs[5]:
                 salvar_data_contratacao_motorista(n, data_contratacao_novo)
             if str(codigo_funcional_novo).strip():
                 salvar_codigo_funcional_motorista(n, codigo_funcional_novo)
-            st.cache_resource.clear()
+            pass  # cadastro é lido a cada execução; não precisa recarregar a base
             st.rerun()
 
     with b:
@@ -4833,7 +4901,7 @@ with tabs[5]:
                 "TIPO": DataUtils.normalizar_texto(tp),
             }])
             salvar_frota_customizada(pd.concat([df, novo], ignore_index=True))
-            st.cache_resource.clear()
+            carregar_base.clear()
             st.rerun()
 
     st.markdown("#### 🔄 Inativar / Reativar Cadastros")
@@ -4895,7 +4963,7 @@ with tabs[5]:
                 salvar_codigo_funcional_motorista(mot_escolhido, codigo_funcional_edit)
                 if mot_esta_inativo and str(data_inativacao_edit).strip():
                     atualizar_data_inativacao_motorista(mot_escolhido, data_inativacao_edit)
-                st.cache_resource.clear()
+                pass  # cadastro é lido a cada execução; não precisa recarregar a base
                 st.success("Datas do motorista salvas com sucesso.")
                 st.rerun()
 
@@ -4904,13 +4972,13 @@ with tabs[5]:
                 if st.button("❌ Inativar Motorista", key="btn_inativar_mot",
                              disabled=((not is_admin) or mot_esta_inativo), use_container_width=True):
                     alternar_inativo("MOTORISTA", mot_escolhido, True, data_inativacao_edit)
-                    st.cache_resource.clear()
+                    pass  # cadastro é lido a cada execução; não precisa recarregar a base
                     st.rerun()
             with b2:
                 if st.button("✅ Reativar Motorista", key="btn_reativar_mot",
                              disabled=((not is_admin) or (not mot_esta_inativo)), use_container_width=True):
                     alternar_inativo("MOTORISTA", mot_escolhido, False)
-                    st.cache_resource.clear()
+                    pass  # cadastro é lido a cada execução; não precisa recarregar a base
                     st.rerun()
 
     with col_placa:
@@ -4935,13 +5003,13 @@ with tabs[5]:
                 if st.button("❌ Inativar Placa", key="btn_inativar_placa",
                              disabled=((not is_admin) or placa_esta_inativa), use_container_width=True):
                     alternar_inativo("PLACA", placa_escolhida, True)
-                    st.cache_resource.clear()
+                    carregar_base.clear()
                     st.rerun()
             with b4:
                 if st.button("✅ Reativar Placa", key="btn_reativar_placa",
                              disabled=((not is_admin) or (not placa_esta_inativa)), use_container_width=True):
                     alternar_inativo("PLACA", placa_escolhida, False)
-                    st.cache_resource.clear()
+                    carregar_base.clear()
                     st.rerun()
 
     cadastro_exib = cadastro.copy()
@@ -5074,7 +5142,7 @@ with tabs[5]:
                         inat_df = pd.concat([inat_df, pd.DataFrame([{"TIPO": "MOTORISTA", "VALOR": nome_novo_norm, "DATA_INATIVACAO": str(data_inativacao_nova_edit or '').strip()}])], ignore_index=True)
                     inat__salvar_csv_com_backup(df, ARQUIVO_INATIVOS)
 
-                st.cache_resource.clear()
+                pass  # cadastro é lido a cada execução; não precisa recarregar a base
                 st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
                 st.rerun()
 
