@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v14"
+_VERSAO_BACKUP = "v15"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4707,6 +4707,37 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     if not is_admin:
         st.info("Somente o administrador pode validar ou trocar o motorista.")
         return
+    st.markdown("#### 🔁 Trocar o motorista de um abastecimento")
+    st.caption("Use quando o abastecimento foi feito por um motorista, mas o km rodado é de outro. Filtre acima por placa ou motorista, "
+               "escolha o(s) abastecimento(s), indique o motorista correto e clique em trocar. A troca já deixa o abastecimento validado.")
+    base_troca = sub.head(500)
+    orig_col = base_troca.get("MOTORISTA_ABASTECIMENTO_ORIGINAL", base_troca["CONDUTOR_NORMALIZADO"]).astype(str)
+    rotulos = {}
+    for i_, d_, p_, l_, k_, m_ in zip(base_troca["ID_ABASTECIMENTO"].astype(str),
+                                      pd.to_datetime(base_troca["DATA_FILTRO"], errors="coerce").dt.strftime("%d/%m/%Y"),
+                                      base_troca["PLACA_PADRONIZADA"].astype(str),
+                                      pd.to_numeric(base_troca.get("QTDE_NUM"), errors="coerce").fillna(0),
+                                      pd.to_numeric(base_troca.get("KM_ATUAL_NUM"), errors="coerce").fillna(0),
+                                      base_troca["MOTORISTA_CONSIDERADO"].fillna("").astype(str)):
+        rotulos[i_] = f"{d_} | {p_} | {l_:.1f} L | {k_:.0f} km | {m_ or '(sem motorista)'}"
+    ids_troca = st.multiselect("Abastecimento(s) a trocar", list(rotulos.keys()), format_func=lambda x: rotulos.get(x, x), key="troca_ids")
+    novo_mot = st.selectbox("Passar para o motorista (digite para buscar)", [""] + opcoes, key="troca_mot")
+    if st.button("🔁 Trocar motorista e validar", key="troca_btn", disabled=not (ids_troca and novo_mot)):
+        orig_map = dict(zip(base_troca["ID_ABASTECIMENTO"].astype(str), orig_col))
+        atual_t = carregar_validacoes_abastecimentos()
+        atual_t = atual_t[~atual_t["ID_ABASTECIMENTO"].isin(ids_troca)]
+        novas_t = pd.DataFrame({
+            "ID_ABASTECIMENTO": ids_troca,
+            "MOTORISTA_VALIDADO": novo_mot,
+            "MOTORISTA_ORIGINAL": [orig_map.get(i, "") for i in ids_troca],
+            "USUARIO": str(st.session_state.get("auth_usuario", "")),
+            "DATA_VALIDACAO": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        })
+        _salvar_csv_com_backup(pd.concat([atual_t, novas_t], ignore_index=True)[COLUNAS_VALIDACOES], ARQUIVO_VALIDACOES)
+        st.success(f"{len(ids_troca)} abastecimento(s) passado(s) para {novo_mot} e validado(s).")
+        st.rerun()
+    st.markdown("---")
+
     b1, b2 = st.columns(2)
     salvar = b1.button("💾 Salvar validações marcadas (esta página)", key="val_salvar", use_container_width=True)
     todos = b2.button(f"✔️ Validar TODOS os {len(sub)} filtrados (como estão)", key="val_todos", use_container_width=True)
@@ -5514,7 +5545,7 @@ if _ABA_ATIVA == 5:
                         cod_df["MOTORISTA"] = cod_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
                         cod_df = cod_df[cod_df["MOTORISTA"] != motorista_editar_norm]
                     cod_df = pd.concat([cod_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "CODIGO_FUNCIONAL": str(codigo_novo_edit or '').strip()}])], ignore_index=True)
-                    cod__salvar_csv_com_backup(df, ARQUIVO_CODIGOS_FUNCIONAIS)
+                    _salvar_csv_com_backup(cod_df, ARQUIVO_CODIGOS_FUNCIONAIS)
 
                     # Data de contratação
                     dt_df = pd.DataFrame({"MOTORISTA": list(datas_edit.keys()), "DATA_CONTRATACAO": list(datas_edit.values())})
@@ -5522,7 +5553,7 @@ if _ABA_ATIVA == 5:
                         dt_df["MOTORISTA"] = dt_df["MOTORISTA"].apply(DataUtils.normalizar_texto)
                         dt_df = dt_df[dt_df["MOTORISTA"] != motorista_editar_norm]
                     dt_df = pd.concat([dt_df, pd.DataFrame([{"MOTORISTA": nome_novo_norm, "DATA_CONTRATACAO": str(data_contratacao_nova_edit or '').strip()}])], ignore_index=True)
-                    dt__salvar_csv_com_backup(df, ARQUIVO_DATAS_MOTORISTAS)
+                    _salvar_csv_com_backup(dt_df, ARQUIVO_DATAS_MOTORISTAS)
 
                     # Status / data de inativação
                     inat_df = pd.DataFrame(columns=["TIPO", "VALOR", "DATA_INATIVACAO"])
@@ -5538,7 +5569,7 @@ if _ABA_ATIVA == 5:
                     inat_df = inat_df[~((inat_df["TIPO"] == "MOTORISTA") & (inat_df["VALOR"].isin([motorista_editar_norm, nome_novo_norm])))]
                     if status_novo_edit == "INATIVO":
                         inat_df = pd.concat([inat_df, pd.DataFrame([{"TIPO": "MOTORISTA", "VALOR": nome_novo_norm, "DATA_INATIVACAO": str(data_inativacao_nova_edit or '').strip()}])], ignore_index=True)
-                    inat__salvar_csv_com_backup(df, ARQUIVO_INATIVOS)
+                    _salvar_csv_com_backup(inat_df, ARQUIVO_INATIVOS)
 
                 pass  # cadastro é lido a cada execução; não precisa recarregar a base
                 st.success("Cadastro completo atualizado com sucesso. Nome, categoria, filial, código, datas e status foram gravados.")
