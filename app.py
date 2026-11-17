@@ -240,9 +240,9 @@ def _normalizar_base_abastecimentos_raw(df, mapa_frota):
     return pd.DataFrame()
   col_placa = DataUtils.encontrar_coluna(df, ["PLACA", "CAVALO"])
   col_km = DataUtils.encontrar_coluna(df, ["KM ATUAL", "KM", "KM_1", "QUILOMETRAGEM"])
-  col_litros = DataUtils.encontrar_coluna(df, ["QTDE", "LITROS", "QUANTIDADE", "QTD"])
-  col_valor = DataUtils.encontrar_coluna(df, ["VALOR TOTAL","VALOR","TOTAL","VALOR_TOTAL","VR TOTAL","VLR TOTAL","VALOR COMBUSTIVEL","VALOR (R$)"])
-  col_motorista = DataUtils.encontrar_coluna(df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS"])
+  col_litros = DataUtils.encontrar_coluna(df, ["QTDE", "LITROS", "QUANTIDADE", "QTD", "QT", "QTD LITROS", "QTDE LITROS"])
+  col_valor = DataUtils.encontrar_coluna(df, ["VALOR TOTAL","VALOR","TOTAL","VALOR_TOTAL","VR TOTAL","VLR TOTAL","VALOR COMBUSTIVEL", "VALOR2", "VALOR 2","VALOR (R$)"])
+  col_motorista = DataUtils.encontrar_coluna(df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS", "NOME", "NOME MOTORISTA", "NOME DO MOTORISTA"])
   col_data = DataUtils.encontrar_coluna(df, ["DATA","Data","DATA ABASTECIMENTO","DATA_ABASTECIMENTO","DATA DO ABASTECIMENTO","DATA/HORA","DATA HORA","DATA EMISSAO","DT_ABASTECIMENTO","DT ABAST"])
   col_hora = DataUtils.encontrar_coluna(df, ["HORA","Hora","HORARIO","HORA ABASTECIMENTO"])
   if any(c is None for c in [col_placa,col_km,col_litros,col_motorista,col_data]):
@@ -252,7 +252,7 @@ def _normalizar_base_abastecimentos_raw(df, mapa_frota):
   # quando os dados vêm dos históricos mensais.
   out["_ORDEM_ORIGINAL"] = np.arange(len(out))
   out["PLACA_PADRONIZADA"]=out[col_placa].apply(DataUtils.padronizar_placa)
-  out["KM_ATUAL_NUM"]=out[col_km].apply(DataUtils.converter_numero)
+  out["KM_ATUAL_NUM"]=out[col_km].apply(DataUtils.converter_km)
   out["QTDE_NUM"]=out[col_litros].apply(DataUtils.converter_numero)
   out["VALOR_NUM"]=out[col_valor].apply(DataUtils.converter_numero).fillna(0.0) if col_valor else 0.0
   out["CONDUTOR_NORMALIZADO"]=out[col_motorista].fillna("SEM MOTORISTA").apply(DataUtils.normalizar_texto)
@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v15"
+_VERSAO_BACKUP = "v16"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -1957,6 +1957,15 @@ class DataUtils:
     except ValueError:
       return np.nan
 
+  @staticmethod
+  def converter_km(valor) -> float:
+    """Odômetro: '451.768' (texto com ponto de milhar) vale 451768 km, não 451,768."""
+    if isinstance(valor, str):
+      t = valor.strip().replace(" ", "")
+      if re.fullmatch(r"\d{1,3}(\.\d{3})+", t):
+        valor = t.replace(".", "")
+    return DataUtils.converter_numero(valor)
+
   @classmethod
   def placa_equivalente_mercosul(cls, placa: str) -> Optional[str]:
     placa = cls.padronizar_placa(placa)
@@ -2333,7 +2342,7 @@ class DataLoader:
         df, ["KM ATUAL", "KM", "KM_1", "QUILOMETRAGEM"]
     )
     col_litros = DataUtils.encontrar_coluna(
-        df, ["QTDE", "LITROS", "QUANTIDADE", "QTD"]
+        df, ["QTDE", "LITROS", "QUANTIDADE", "QTD", "QT", "QTD LITROS", "QTDE LITROS"]
     )
     col_valor = DataUtils.encontrar_coluna(
         df,
@@ -2344,12 +2353,12 @@ class DataLoader:
             "VALOR_TOTAL",
             "VR TOTAL",
             "VLR TOTAL",
-            "VALOR COMBUSTIVEL",
+            "VALOR COMBUSTIVEL", "VALOR2", "VALOR 2",
             "VALOR (R$)",
         ],
     )
     col_motorista = DataUtils.encontrar_coluna(
-        df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS"]
+        df, ["CONDUTOR", "MOTORISTA", "MOTORISTAS", "NOME", "NOME MOTORISTA", "NOME DO MOTORISTA"]
     )
     col_data = DataUtils.encontrar_coluna(
         df,
