@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v20"
+_VERSAO_BACKUP = "v21"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -5229,7 +5229,7 @@ if _ABA_ATIVA == 0:
     else:
 
         premio_cat=res_f.groupby("CATEGORIA",dropna=False)["PREMIO"].sum().sort_values(ascending=False).to_frame("VALOR"); premio_cat.index=premio_cat.index.fillna("SEM CATEGORIA")
-        premio_filial=res_f.assign(BASE=res_f["BASE"].fillna("SEM FILIAL")).groupby("BASE")["PREMIO"].sum().sort_values(ascending=False).to_frame("VALOR")
+        premio_filial=res_f.assign(BASE=res_f["BASE"].fillna("SEM FILIAL").astype(str).replace({"": "SEM FILIAL"})).groupby("BASE")["PREMIO"].sum().sort_values(ascending=False).to_frame("VALOR")
         top_mots=res_f[["MOTORISTA","PREMIO"]].copy().sort_values("PREMIO",ascending=False).head(7).set_index("MOTORISTA").rename(columns={"PREMIO":"VALOR"})
         consumo_cat=res_f.groupby("CATEGORIA",dropna=False)[["KM_TOTAL","LITROS_TOTAL"]].sum().sort_values("KM_TOTAL",ascending=False); consumo_cat.index=consumo_cat.index.fillna("SEM CATEGORIA")
 
@@ -5239,6 +5239,14 @@ if _ABA_ATIVA == 0:
         c1,c2=st.columns(2)
         with c1: barras_html("💰 Prêmio por Categoria",f"Total {_brl(premio_cat['VALOR'].sum())}",premio_cat,_brl,0)
         with c2: barras_html("🏢 Prêmio por Filial",f"{len(premio_filial)} filial(is) na competência",premio_filial,_brl,1)
+        _b = res_f["BASE"].fillna("").astype(str).str.strip()
+        if (_b == "").any():
+            _nome = next((c for c in ("MOTORISTA", "CONDUTOR_NORMALIZADO", "CONDUTOR") if c in res_f.columns), None)
+            with st.expander(f"🔎 Ver os {int((_b == '').sum())} motorista(s) sem filial"):
+                _cols = [c for c in (_nome, "PREMIO") if c]
+                st.dataframe(res_f.loc[_b == "", _cols].sort_values("PREMIO", ascending=False) if "PREMIO" in _cols else res_f.loc[_b == "", _cols],
+                             use_container_width=True, hide_index=True)
+                st.caption("Eles aparecem sem filial porque a base não está preenchida no cadastro do motorista. Edite o cadastro e informe a filial para que entrem na filial correta.")
 
         km_df=consumo_cat[["KM_TOTAL"]].rename(columns={"KM_TOTAL":"VALOR"}); lit_df=consumo_cat[["LITROS_TOTAL"]].rename(columns={"LITROS_TOTAL":"VALOR"})
         c3,c4=st.columns(2)
