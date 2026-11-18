@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v19"
+_VERSAO_BACKUP = "v20"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4796,6 +4796,11 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     for i_, s_ in zip(base_troca["ID_ABASTECIMENTO"].astype(str), base_troca["SUSPEITA"].astype(str)):
         if s_.strip() and i_ in rotulos:
             rotulos[i_] += f"  ⚠️ {s_}"
+    # Seleções antigas (de outro filtro/página) que não existem mais na lista atual são descartadas
+    if st.session_state.get("corr_id") not in ([""] + list(rotulos.keys())):
+        st.session_state["corr_id"] = ""
+    if "troca_ids" in st.session_state:
+        st.session_state["troca_ids"] = [i for i in st.session_state["troca_ids"] if i in rotulos]
     ids_troca = st.multiselect("Abastecimento(s) a trocar", list(rotulos.keys()), format_func=lambda x: rotulos.get(x, x), key="troca_ids")
     novo_mot = st.selectbox("Passar para o motorista (digite para buscar)", [""] + opcoes, key="troca_mot")
     if st.button("🔁 Trocar motorista e validar", key="troca_btn", disabled=not (ids_troca and novo_mot)):
@@ -4818,8 +4823,11 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     st.caption("Se o KM veio errado na planilha, informe o KM correto: o consumo (km rodado entre abastecimentos) é recalculado com o valor corrigido. "
                "Se o lançamento estiver duplicado, exclua-o (ele deixa de contar em litros, valor e consumo). Litros e valor também podem ser ajustados.")
     alvo = st.selectbox("Abastecimento", [""] + list(rotulos.keys()), format_func=lambda x: rotulos.get(x, "— escolha —"), key="corr_id")
-    if alvo:
-        lin = base_troca[base_troca["ID_ABASTECIMENTO"].astype(str) == alvo].iloc[0]
+    _linhas_alvo = base_troca[base_troca["ID_ABASTECIMENTO"].astype(str) == alvo] if alvo else base_troca.iloc[0:0]
+    if alvo and _linhas_alvo.empty:
+        st.info("Esse abastecimento não está mais na lista com os filtros atuais. Escolha novamente.")
+    elif alvo:
+        lin = _linhas_alvo.iloc[0]
         st.caption(f"Na planilha: KM {lin['KM_PLANILHA']:.0f} · {lin['LITROS_PLANILHA']:.2f} L · R$ {lin['VALOR_PLANILHA']:.2f}")
         acao_sel = st.radio("O que fazer", ["Corrigir KM / litros / valor", "Excluir (lançamento duplicado ou inválido)"], horizontal=True, key="corr_acao")
         km_n = lt_n = vl_n = None
@@ -4844,6 +4852,8 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     if len(ajust):
         rot_aj = {str(r.ID_CORRECAO): f"{r.AJUSTE} | {r.PLACA_PADRONIZADA} | {pd.to_datetime(r.DATA_FILTRO).strftime('%d/%m/%Y')} | KM planilha {r.KM_PLANILHA:.0f} → {r.KM_ATUAL_NUM:.0f}"
                   for r in ajust.head(200).itertuples()}
+        if st.session_state.get("corr_desfazer") not in ([""] + list(rot_aj.keys())):
+            st.session_state["corr_desfazer"] = ""
         des = st.selectbox("Desfazer uma correção/exclusão", [""] + list(rot_aj.keys()), format_func=lambda x: rot_aj.get(x, "— escolha —"), key="corr_desfazer")
         if des and st.button("↩️ Desfazer correção", key="corr_desfazer_btn"):
             cor_at = carregar_correcoes_abastecimentos()
