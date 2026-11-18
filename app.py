@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v15"
+_VERSAO_BACKUP = "v19"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4487,6 +4487,28 @@ def carregar_base(cache_token=None):
 ARQUIVO_VALIDACOES = os.path.join(DATA_DIR, "validacoes_abastecimentos.csv")
 ARQUIVO_CONFIG_VALIDACAO = os.path.join(DATA_DIR, "config_validacao.json")
 COLUNAS_VALIDACOES = ["ID_ABASTECIMENTO", "MOTORISTA_VALIDADO", "MOTORISTA_ORIGINAL", "USUARIO", "DATA_VALIDACAO"]
+ARQUIVO_CORRECOES = os.path.join(DATA_DIR, "correcoes_abastecimentos.csv")
+COLUNAS_CORRECOES = ["ID_CORRECAO", "ACAO", "KM_CORRIGIDO", "LITROS_CORRIGIDO", "VALOR_CORRIGIDO", "MOTIVO", "USUARIO", "DATA_CORRECAO"]
+
+
+def carregar_correcoes_abastecimentos():
+    try:
+        df = pd.read_csv(ARQUIVO_CORRECOES, dtype=str, encoding="utf-8-sig").fillna("")
+    except Exception:
+        return pd.DataFrame(columns=COLUNAS_CORRECOES)
+    for c in COLUNAS_CORRECOES:
+        if c not in df.columns:
+            df[c] = ""
+    return df[COLUNAS_CORRECOES]
+
+
+def _chaves_estaveis(ab, col_dt):
+    """Identifica o abastecimento pelo CONTEÚDO da planilha (placa, data, km, litros, valor): não muda se a planilha for reordenada."""
+    d = pd.to_datetime(ab[col_dt], errors="coerce").dt.strftime("%Y%m%d").fillna("")
+    num = lambda c, n: pd.to_numeric(ab[c], errors="coerce").round(n).astype(str)
+    base = (ab["PLACA_PADRONIZADA"].astype(str) + "|" + d + "|" + num("KM_ATUAL_NUM", 1) + "|"
+            + num("QTDE_NUM", 2) + "|" + num("VALOR_NUM", 2))
+    return base + "#" + base.groupby(base).cumcount().astype(str)
 
 
 def _inicio_competencia(d):
@@ -4556,6 +4578,27 @@ def aplicar_validacoes_manuais(ab, ev):
     if col_dt is None or "CONDUTOR_NORMALIZADO" not in ab.columns or "PLACA_PADRONIZADA" not in ab.columns:
         return ab, ev
     ab = ab.copy()
+    ab["ID_CORRECAO"] = _chaves_estaveis(ab, col_dt)
+    ab["KM_PLANILHA"] = ab["KM_ATUAL_NUM"]; ab["LITROS_PLANILHA"] = ab["QTDE_NUM"]; ab["VALOR_PLANILHA"] = ab["VALOR_NUM"]
+    ab["AJUSTE"] = ""; ab["EXCLUIDO"] = False
+    recalcular = False
+    cor = carregar_correcoes_abastecimentos()
+    if len(cor):
+        cmap = cor.drop_duplicates("ID_CORRECAO", keep="last").set_index("ID_CORRECAO")
+        kk = ab["ID_CORRECAO"]
+        acao = kk.map(cmap["ACAO"])
+        m_ex = acao.eq("EXCLUIR"); m_co = acao.eq("CORRIGIR")
+        for col_ab, col_c in (("KM_ATUAL_NUM", "KM_CORRIGIDO"), ("QTDE_NUM", "LITROS_CORRIGIDO"), ("VALOR_NUM", "VALOR_CORRIGIDO")):
+            novo_v = pd.to_numeric(kk.map(cmap[col_c]), errors="coerce")
+            usar = m_co & novo_v.notna()
+            ab.loc[usar, col_ab] = novo_v[usar]
+        ab.loc[m_ex, "QTDE_NUM"] = 0.0
+        ab.loc[m_ex, "VALOR_NUM"] = 0.0
+        ab["EXCLUIDO"] = m_ex.values
+        ab["AJUSTE"] = np.where(m_ex, "EXCLUÍDO", np.where(m_co, "CORRIGIDO", ""))
+        ab["REGISTRO_VALIDO"] = ((ab["PLACA_PADRONIZADA"].astype(str) != "") & ab["KM_ATUAL_NUM"].notna() & (ab["KM_ATUAL_NUM"] > 0)
+                                 & ab["QTDE_NUM"].notna() & (ab["QTDE_NUM"] > 0))
+        recalcular = bool((m_ex | m_co).any())
     if "STATUS_VALIDACAO_VIAGEM" in ab.columns:
         ab["CONCILIACAO_VIAGENS"] = ab["STATUS_VALIDACAO_VIAGEM"]
     datas = pd.to_datetime(ab[col_dt], errors="coerce").dt.normalize()
@@ -4564,12 +4607,29 @@ def aplicar_validacoes_manuais(ab, ev):
     chave = pd.DataFrame({"c": comp, "m": mot0, "p": ab["PLACA_PADRONIZADA"].fillna("").astype(str)})
     nplacas = chave.groupby(["c", "m"])["p"].transform("nunique")
     multi = (nplacas > 1) & (mot0.str.strip() != "") & datas.notna()
+    # Lançamentos suspeitos (para a conferência): possível duplicado, km que não cresce, salto de km
+    sus = pd.Series("", index=ab.index)
+    ok = ab["REGISTRO_VALIDO"].astype(bool) & ~ab["EXCLUIDO"]
+    if ok.any():
+        ordem = ab["_ORDEM_ORIGINAL"] if "_ORDEM_ORIGINAL" in ab.columns else pd.Series(np.arange(len(ab)), index=ab.index)
+        t = ab.loc[ok, ["PLACA_PADRONIZADA", "KM_ATUAL_NUM"]].assign(_d=datas[ok].fillna(pd.Timestamp("1900-01-01")), _o=ordem[ok])
+        t = t.sort_values(["PLACA_PADRONIZADA", "_d", "_o"], kind="stable")
+        dif = t.groupby("PLACA_PADRONIZADA")["KM_ATUAL_NUM"].diff()
+        sus.loc[dif[dif <= 0].index] = "KM NÃO CRESCE"
+        sus.loc[dif[dif > 3000].index] = "SALTO DE KM"
+        dk = (ab["PLACA_PADRONIZADA"].astype(str) + "|" + datas.dt.strftime("%Y%m%d").fillna("") + "|"
+              + ab["QTDE_NUM"].round(2).astype(str) + "|" + ab["VALOR_NUM"].round(2).astype(str))
+        dup = ok & dk.groupby(dk).transform("size").gt(1)
+        sus.loc[dup & (sus == "")] = "POSSÍVEL DUPLICADO"
+        sus.loc[dup & (sus != "") & ~sus.str.contains("DUPLICADO")] += " + POSSÍVEL DUPLICADO"
+    ab["SUSPEITA"] = sus
     ini_exig = carregar_exigencia_validacao()
     if ini_exig:
         alvo = multi if carregar_escopo_validacao() == "MULTIPLAS" else datas.notna()
         exige = alvo & (datas >= pd.Timestamp(ini_exig))
     else:
         exige = pd.Series(False, index=ab.index)
+    exige = exige & ~ab["EXCLUIDO"]
 
     vdf = carregar_validacoes_abastecimentos()
     vmap = {str(i): str(m) for i, m in zip(vdf["ID_ABASTECIMENTO"], vdf["MOTORISTA_VALIDADO"]) if str(m).strip()}
@@ -4578,7 +4638,7 @@ def aplicar_validacoes_manuais(ab, ev):
     novo = ids.map(vmap)
     novo_norm = novo.fillna("").apply(DataUtils.normalizar_texto)
     mudou = validado & (novo_norm != mot0)
-    status = pd.Series(np.where(validado, np.where(mudou, "CORRIGIDO", "VALIDADO"), np.where(exige, "PENDENTE", "")), index=ab.index)
+    status = pd.Series(np.where(ab["EXCLUIDO"], "EXCLUIDO", np.where(validado, np.where(mudou, "CORRIGIDO", "VALIDADO"), np.where(exige, "PENDENTE", ""))), index=ab.index)
 
     ab["MULTI_PLACA"] = multi.astype(bool)
     ab["EXIGE_VALIDACAO"] = exige.astype(bool)
@@ -4588,11 +4648,16 @@ def aplicar_validacoes_manuais(ab, ev):
     ab.loc[validado, "MOTORISTA_CONSIDERADO"] = novo[validado]
     ab.loc[validado, "CONDUTOR_NORMALIZADO"] = novo_norm[validado]
     rot = {"VALIDADO": "VALIDADO MANUALMENTE", "CORRIGIDO": "CORRIGIDO MANUALMENTE",
-           "PENDENTE": "PENDENTE DE VALIDAÇÃO — MÚLTIPLAS PLACAS"}
+           "PENDENTE": "PENDENTE DE VALIDAÇÃO — MÚLTIPLAS PLACAS", "EXCLUIDO": "EXCLUÍDO (DUPLICADO/INVÁLIDO)"}
     if "STATUS_VALIDACAO_VIAGEM" in ab.columns:
         m_ = status.isin(list(rot))
         ab.loc[m_, "STATUS_VALIDACAO_VIAGEM"] = status[m_].map(rot)
 
+    if recalcular:
+        try:
+            ev = engine.calcular_eventos_consumo(ab)  # refaz o consumo com km/litros corrigidos e sem os excluídos
+        except Exception as exc:
+            print(f"Aviso: não foi possível recalcular o consumo com as correções: {exc}")
     if ev is not None and not ev.empty and "ID_ABASTECIMENTO" in ev.columns:
         ev = ev.copy()
         eids = ev["ID_ABASTECIMENTO"].fillna("").astype(str)
@@ -4621,6 +4686,8 @@ def _view_validacao(df, col_motor):
         "LITROS": pd.to_numeric(df.get("QTDE_NUM"), errors="coerce").values,
         "KM": pd.to_numeric(df.get("KM_ATUAL_NUM"), errors="coerce").values,
         "VALOR": pd.to_numeric(df.get("VALOR_NUM"), errors="coerce").values,
+        "SUSPEITA": df["SUSPEITA"].replace({"": "—"}).values if "SUSPEITA" in df.columns else "—",
+        "AJUSTE": df["AJUSTE"].replace({"": "—"}).values if "AJUSTE" in df.columns else "—",
         "STATUS": df["STATUS_VALIDACAO_MANUAL"].replace({"": "—"}).values,
     })
 
@@ -4669,7 +4736,9 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     mots = sorted(sub_all["CONDUTOR_NORMALIZADO"].dropna().astype(str).replace({"": "(SEM MOTORISTA)"}).unique().tolist())
     mot_sel = fa.selectbox("Motorista", ["TODOS"] + mots, key="val_mot")
     placa_sel = fb.text_input("Placa", key="val_placa")
-    st_sel = fc.selectbox("Mostrar", ["Pendentes", "Todos", "Validados / corrigidos"], key="val_status")
+    st_sel = fc.selectbox("Mostrar", ["Pendentes", "Todos", "Validados / corrigidos", "Suspeitos (duplicado / KM)", "KM corrigido / excluídos"], key="val_status")
+    n_sus = int((sub_all["SUSPEITA"] != "").sum()); n_aj = int((sub_all["AJUSTE"] != "").sum())
+    st.caption(f"⚠️ {n_sus} lançamento(s) suspeito(s) (possível duplicado ou KM inconsistente) · 🛠️ {n_aj} corrigido(s)/excluído(s) manualmente")
     sub = sub_all
     if mot_sel != "TODOS":
         sub = sub[sub["CONDUTOR_NORMALIZADO"].astype(str).replace({"": "(SEM MOTORISTA)"}) == mot_sel]
@@ -4679,6 +4748,10 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
         sub = sub[sub["STATUS_VALIDACAO_MANUAL"] == "PENDENTE"]
     elif st_sel == "Validados / corrigidos":
         sub = sub[sub["STATUS_VALIDACAO_MANUAL"].isin(["VALIDADO", "CORRIGIDO"])]
+    elif st_sel.startswith("Suspeitos"):
+        sub = sub[sub["SUSPEITA"] != ""]
+    elif st_sel.startswith("KM corrigido"):
+        sub = sub[sub["AJUSTE"] != ""]
     if sub.empty:
         st.info("Nada a mostrar com esses filtros.")
         return
@@ -4720,6 +4793,9 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
                                       pd.to_numeric(base_troca.get("KM_ATUAL_NUM"), errors="coerce").fillna(0),
                                       base_troca["MOTORISTA_CONSIDERADO"].fillna("").astype(str)):
         rotulos[i_] = f"{d_} | {p_} | {l_:.1f} L | {k_:.0f} km | {m_ or '(sem motorista)'}"
+    for i_, s_ in zip(base_troca["ID_ABASTECIMENTO"].astype(str), base_troca["SUSPEITA"].astype(str)):
+        if s_.strip() and i_ in rotulos:
+            rotulos[i_] += f"  ⚠️ {s_}"
     ids_troca = st.multiselect("Abastecimento(s) a trocar", list(rotulos.keys()), format_func=lambda x: rotulos.get(x, x), key="troca_ids")
     novo_mot = st.selectbox("Passar para o motorista (digite para buscar)", [""] + opcoes, key="troca_mot")
     if st.button("🔁 Trocar motorista e validar", key="troca_btn", disabled=not (ids_troca and novo_mot)):
@@ -4738,13 +4814,51 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
         st.rerun()
     st.markdown("---")
 
+    st.markdown("#### 🛠️ Corrigir KM (ou excluir lançamento duplicado)")
+    st.caption("Se o KM veio errado na planilha, informe o KM correto: o consumo (km rodado entre abastecimentos) é recalculado com o valor corrigido. "
+               "Se o lançamento estiver duplicado, exclua-o (ele deixa de contar em litros, valor e consumo). Litros e valor também podem ser ajustados.")
+    alvo = st.selectbox("Abastecimento", [""] + list(rotulos.keys()), format_func=lambda x: rotulos.get(x, "— escolha —"), key="corr_id")
+    if alvo:
+        lin = base_troca[base_troca["ID_ABASTECIMENTO"].astype(str) == alvo].iloc[0]
+        st.caption(f"Na planilha: KM {lin['KM_PLANILHA']:.0f} · {lin['LITROS_PLANILHA']:.2f} L · R$ {lin['VALOR_PLANILHA']:.2f}")
+        acao_sel = st.radio("O que fazer", ["Corrigir KM / litros / valor", "Excluir (lançamento duplicado ou inválido)"], horizontal=True, key="corr_acao")
+        km_n = lt_n = vl_n = None
+        if acao_sel.startswith("Corrigir"):
+            x1, x2, x3 = st.columns(3)
+            km_n = x1.number_input("KM correto", value=float(lin["KM_ATUAL_NUM"] or 0), step=1.0, format="%.0f", key=f"corr_km_{alvo}")
+            lt_n = x2.number_input("Litros", value=float(lin["QTDE_NUM"] or 0), step=1.0, format="%.2f", key=f"corr_lt_{alvo}")
+            vl_n = x3.number_input("Valor (R$)", value=float(lin["VALOR_NUM"] or 0), step=1.0, format="%.2f", key=f"corr_vl_{alvo}")
+        motivo = st.text_input("Motivo (opcional)", key=f"corr_motivo_{alvo}")
+        if st.button("Aplicar correção", key="corr_btn"):
+            cor_at = carregar_correcoes_abastecimentos()
+            cor_at = cor_at[cor_at["ID_CORRECAO"] != str(lin["ID_CORRECAO"])]
+            nova = pd.DataFrame([{
+                "ID_CORRECAO": str(lin["ID_CORRECAO"]), "ACAO": "CORRIGIR" if km_n is not None else "EXCLUIR",
+                "KM_CORRIGIDO": "" if km_n is None else str(km_n), "LITROS_CORRIGIDO": "" if lt_n is None else str(lt_n),
+                "VALOR_CORRIGIDO": "" if vl_n is None else str(vl_n), "MOTIVO": motivo,
+                "USUARIO": str(st.session_state.get("auth_usuario", "")), "DATA_CORRECAO": datetime.now().strftime("%d/%m/%Y %H:%M:%S")}])
+            _salvar_csv_com_backup(pd.concat([cor_at, nova], ignore_index=True)[COLUNAS_CORRECOES], ARQUIVO_CORRECOES)
+            st.success("Correção aplicada; o consumo foi recalculado.")
+            st.rerun()
+    ajust = sub_all[sub_all["AJUSTE"] != ""]
+    if len(ajust):
+        rot_aj = {str(r.ID_CORRECAO): f"{r.AJUSTE} | {r.PLACA_PADRONIZADA} | {pd.to_datetime(r.DATA_FILTRO).strftime('%d/%m/%Y')} | KM planilha {r.KM_PLANILHA:.0f} → {r.KM_ATUAL_NUM:.0f}"
+                  for r in ajust.head(200).itertuples()}
+        des = st.selectbox("Desfazer uma correção/exclusão", [""] + list(rot_aj.keys()), format_func=lambda x: rot_aj.get(x, "— escolha —"), key="corr_desfazer")
+        if des and st.button("↩️ Desfazer correção", key="corr_desfazer_btn"):
+            cor_at = carregar_correcoes_abastecimentos()
+            _salvar_csv_com_backup(cor_at[cor_at["ID_CORRECAO"] != des], ARQUIVO_CORRECOES)
+            st.success("Correção desfeita.")
+            st.rerun()
+    st.markdown("---")
+
     b1, b2 = st.columns(2)
     salvar = b1.button("💾 Salvar validações marcadas (esta página)", key="val_salvar", use_container_width=True)
     todos = b2.button(f"✔️ Validar TODOS os {len(sub)} filtrados (como estão)", key="val_todos", use_container_width=True)
     if salvar or todos:
         orig = dict(zip(view["ID"], view["VALIDAR"]))
         if todos:
-            ed = _view_validacao(sub, col_motor)
+            ed = _view_validacao(sub[sub["STATUS_VALIDACAO_MANUAL"] != "EXCLUIDO"], col_motor)
             ed["VALIDAR"] = True
             trocas = dict(zip(edited["ID"].astype(str), edited[col_motor]))
             ed[col_motor] = [trocas.get(i, m) for i, m in zip(ed["ID"], ed[col_motor])]
@@ -4752,7 +4866,7 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
         else:
             ed = edited.copy()
             desmarcados = [i for i in ed.loc[~ed["VALIDAR"], "ID"].astype(str) if orig.get(i, False)]
-        marcados = ed[ed["VALIDAR"]]
+        marcados = ed[ed["VALIDAR"] & (ed["STATUS"] != "EXCLUIDO")]
         sem_mot = marcados[col_motor].isna() | (marcados[col_motor].astype(str).str.strip() == "")
         if sem_mot.any():
             st.warning(f"{int(sem_mot.sum())} abastecimento(s) sem motorista foram ignorados: escolha o motorista antes de validar.")
