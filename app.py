@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v21"
+_VERSAO_BACKUP = "v23"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -4488,7 +4488,7 @@ ARQUIVO_VALIDACOES = os.path.join(DATA_DIR, "validacoes_abastecimentos.csv")
 ARQUIVO_CONFIG_VALIDACAO = os.path.join(DATA_DIR, "config_validacao.json")
 COLUNAS_VALIDACOES = ["ID_ABASTECIMENTO", "MOTORISTA_VALIDADO", "MOTORISTA_ORIGINAL", "USUARIO", "DATA_VALIDACAO"]
 ARQUIVO_CORRECOES = os.path.join(DATA_DIR, "correcoes_abastecimentos.csv")
-COLUNAS_CORRECOES = ["ID_CORRECAO", "ACAO", "KM_CORRIGIDO", "LITROS_CORRIGIDO", "VALOR_CORRIGIDO", "MOTIVO", "USUARIO", "DATA_CORRECAO"]
+COLUNAS_CORRECOES = ["ID_CORRECAO", "ACAO", "KM_CORRIGIDO", "LITROS_CORRIGIDO", "VALOR_CORRIGIDO", "PLACA_CORRIGIDA", "MOTIVO", "USUARIO", "DATA_CORRECAO"]
 
 
 def carregar_correcoes_abastecimentos():
@@ -4509,6 +4509,39 @@ def _chaves_estaveis(ab, col_dt):
     base = (ab["PLACA_PADRONIZADA"].astype(str) + "|" + d + "|" + num("KM_ATUAL_NUM", 1) + "|"
             + num("QTDE_NUM", 2) + "|" + num("VALOR_NUM", 2))
     return base + "#" + base.groupby(base).cumcount().astype(str)
+
+
+ARQUIVO_ALIASES_MOTORISTAS = os.path.join(DATA_DIR, "aliases_motoristas.csv")
+COLUNAS_ALIASES = ["NOME_PLANILHA", "NOME_CADASTRO", "USUARIO", "DATA_VINCULO"]
+
+
+def carregar_aliases_motoristas():
+    try:
+        df = pd.read_csv(ARQUIVO_ALIASES_MOTORISTAS, dtype=str, encoding="utf-8-sig").fillna("")
+    except Exception:
+        return pd.DataFrame(columns=COLUNAS_ALIASES)
+    for c in COLUNAS_ALIASES:
+        if c not in df.columns:
+            df[c] = ""
+    return df[COLUNAS_ALIASES]
+
+
+def aplicar_aliases_motoristas(ab, ev):
+    """Quando o nome na planilha de abastecimento difere do cadastro, usa o nome do cadastro (vínculo feito na tela)."""
+    al = carregar_aliases_motoristas()
+    mapa = {str(a).strip().upper(): str(b).strip().upper() for a, b in zip(al["NOME_PLANILHA"], al["NOME_CADASTRO"]) if str(a).strip() and str(b).strip()}
+    if not mapa:
+        return ab, ev
+    def _troca(df):
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        for c in ("CONDUTOR_NORMALIZADO", "MOTORISTA_CONSIDERADO"):
+            if c in df.columns:
+                up = df[c].fillna("").astype(str).str.strip().str.upper()
+                df[c] = up.map(lambda x: mapa.get(x, x))
+        return df
+    return _troca(ab), _troca(ev)
 
 
 def _inicio_competencia(d):
@@ -4579,6 +4612,7 @@ def aplicar_validacoes_manuais(ab, ev):
         return ab, ev
     ab = ab.copy()
     ab["ID_CORRECAO"] = _chaves_estaveis(ab, col_dt)
+    ab["PLACA_PLANILHA"] = ab["PLACA_PADRONIZADA"]
     ab["KM_PLANILHA"] = ab["KM_ATUAL_NUM"]; ab["LITROS_PLANILHA"] = ab["QTDE_NUM"]; ab["VALOR_PLANILHA"] = ab["VALOR_NUM"]
     ab["AJUSTE"] = ""; ab["EXCLUIDO"] = False
     recalcular = False
@@ -4592,6 +4626,17 @@ def aplicar_validacoes_manuais(ab, ev):
             novo_v = pd.to_numeric(kk.map(cmap[col_c]), errors="coerce")
             usar = m_co & novo_v.notna()
             ab.loc[usar, col_ab] = novo_v[usar]
+        placa_nova = kk.map(cmap["PLACA_CORRIGIDA"]).fillna("").astype(str).str.strip()
+        troca_p = m_co & (placa_nova != "")
+        if troca_p.any():
+            ab.loc[troca_p, "PLACA_PADRONIZADA"] = placa_nova[troca_p].apply(DataUtils.padronizar_placa)
+            if "TIPO" in ab.columns:
+                tipo_novo = ab.loc[troca_p, "PLACA_PADRONIZADA"].map(mapa_frota)
+                for idx_ in tipo_novo.index[tipo_novo.isna()]:
+                    eq_ = DataUtils.placa_equivalente_mercosul(ab.at[idx_, "PLACA_PADRONIZADA"])
+                    if eq_ and eq_ in mapa_frota:
+                        tipo_novo.at[idx_] = mapa_frota[eq_]
+                ab.loc[troca_p, "TIPO"] = tipo_novo
         ab.loc[m_ex, "QTDE_NUM"] = 0.0
         ab.loc[m_ex, "VALOR_NUM"] = 0.0
         ab["EXCLUIDO"] = m_ex.values
@@ -4828,14 +4873,21 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
         st.info("Esse abastecimento não está mais na lista com os filtros atuais. Escolha novamente.")
     elif alvo:
         lin = _linhas_alvo.iloc[0]
-        st.caption(f"Na planilha: KM {lin['KM_PLANILHA']:.0f} · {lin['LITROS_PLANILHA']:.2f} L · R$ {lin['VALOR_PLANILHA']:.2f}")
+        st.caption(f"Na planilha: placa {lin['PLACA_PLANILHA']} · KM {lin['KM_PLANILHA']:.0f} · {lin['LITROS_PLANILHA']:.2f} L · R$ {lin['VALOR_PLANILHA']:.2f}")
         acao_sel = st.radio("O que fazer", ["Corrigir KM / litros / valor", "Excluir (lançamento duplicado ou inválido)"], horizontal=True, key="corr_acao")
-        km_n = lt_n = vl_n = None
+        km_n = lt_n = vl_n = placa_n = None
         if acao_sel.startswith("Corrigir"):
             x1, x2, x3 = st.columns(3)
             km_n = x1.number_input("KM correto", value=float(lin["KM_ATUAL_NUM"] or 0), step=1.0, format="%.0f", key=f"corr_km_{alvo}")
             lt_n = x2.number_input("Litros", value=float(lin["QTDE_NUM"] or 0), step=1.0, format="%.2f", key=f"corr_lt_{alvo}")
             vl_n = x3.number_input("Valor (R$)", value=float(lin["VALOR_NUM"] or 0), step=1.0, format="%.2f", key=f"corr_vl_{alvo}")
+            placa_n = st.text_input("Placa correta", value=str(lin["PLACA_PADRONIZADA"]), key=f"corr_placa_{alvo}",
+                                    help="Informe a placa onde o abastecimento deveria estar. O consumo é recalculado nas duas placas.")
+            placa_n = DataUtils.padronizar_placa(placa_n) if str(placa_n).strip() else str(lin["PLACA_PADRONIZADA"])
+            if placa_n != str(lin["PLACA_PADRONIZADA"]) and placa_n not in mapa_frota:
+                st.warning("Essa placa não está na frota cadastrada: o tipo do veículo não será identificado. Confira a digitação.")
+            if placa_n != str(lin["PLACA_PADRONIZADA"]):
+                st.info("Ao trocar a placa, confira também o motorista na tabela acima (ele vem da conciliação das viagens da placa antiga).")
         motivo = st.text_input("Motivo (opcional)", key=f"corr_motivo_{alvo}")
         if st.button("Aplicar correção", key="corr_btn"):
             cor_at = carregar_correcoes_abastecimentos()
@@ -4843,14 +4895,15 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
             nova = pd.DataFrame([{
                 "ID_CORRECAO": str(lin["ID_CORRECAO"]), "ACAO": "CORRIGIR" if km_n is not None else "EXCLUIR",
                 "KM_CORRIGIDO": "" if km_n is None else str(km_n), "LITROS_CORRIGIDO": "" if lt_n is None else str(lt_n),
-                "VALOR_CORRIGIDO": "" if vl_n is None else str(vl_n), "MOTIVO": motivo,
+                "VALOR_CORRIGIDO": "" if vl_n is None else str(vl_n),
+                "PLACA_CORRIGIDA": "" if (placa_n is None or placa_n == str(lin["PLACA_PLANILHA"])) else placa_n, "MOTIVO": motivo,
                 "USUARIO": str(st.session_state.get("auth_usuario", "")), "DATA_CORRECAO": datetime.now().strftime("%d/%m/%Y %H:%M:%S")}])
             _salvar_csv_com_backup(pd.concat([cor_at, nova], ignore_index=True)[COLUNAS_CORRECOES], ARQUIVO_CORRECOES)
             st.success("Correção aplicada; o consumo foi recalculado.")
             st.rerun()
     ajust = sub_all[sub_all["AJUSTE"] != ""]
     if len(ajust):
-        rot_aj = {str(r.ID_CORRECAO): f"{r.AJUSTE} | {r.PLACA_PADRONIZADA} | {pd.to_datetime(r.DATA_FILTRO).strftime('%d/%m/%Y')} | KM planilha {r.KM_PLANILHA:.0f} → {r.KM_ATUAL_NUM:.0f}"
+        rot_aj = {str(r.ID_CORRECAO): f"{r.AJUSTE} | {r.PLACA_PLANILHA if r.PLACA_PLANILHA == r.PLACA_PADRONIZADA else r.PLACA_PLANILHA + ' → ' + r.PLACA_PADRONIZADA} | {pd.to_datetime(r.DATA_FILTRO).strftime('%d/%m/%Y')} | KM planilha {r.KM_PLANILHA:.0f} → {r.KM_ATUAL_NUM:.0f}"
                   for r in ajust.head(200).itertuples()}
         if st.session_state.get("corr_desfazer") not in ([""] + list(rot_aj.keys())):
             st.session_state["corr_desfazer"] = ""
@@ -4897,6 +4950,7 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
 
 config, loader, engine, precos, frota, mapa_frota, abastecimentos, eventos = carregar_base(_CACHE_BASE_TOKEN)
 cadastro = loader.carregar_cadastro_motoristas()  # leve: lido a cada execução, sem recarregar planilhas
+abastecimentos, eventos = aplicar_aliases_motoristas(abastecimentos, eventos)
 abastecimentos, eventos = aplicar_validacoes_manuais(abastecimentos, eventos)
 cadastro_all = cadastro.copy()
 
@@ -5241,12 +5295,35 @@ if _ABA_ATIVA == 0:
         with c2: barras_html("🏢 Prêmio por Filial",f"{len(premio_filial)} filial(is) na competência",premio_filial,_brl,1)
         _b = res_f["BASE"].fillna("").astype(str).str.strip()
         if (_b == "").any():
+            import difflib
             _nome = next((c for c in ("MOTORISTA", "CONDUTOR_NORMALIZADO", "CONDUTOR") if c in res_f.columns), None)
-            with st.expander(f"🔎 Ver os {int((_b == '').sum())} motorista(s) sem filial"):
+            _sem = res_f.loc[_b == ""]
+            with st.expander(f"🔎 Ver os {len(_sem)} motorista(s) sem filial"):
                 _cols = [c for c in (_nome, "PREMIO") if c]
-                st.dataframe(res_f.loc[_b == "", _cols].sort_values("PREMIO", ascending=False) if "PREMIO" in _cols else res_f.loc[_b == "", _cols],
-                             use_container_width=True, hide_index=True)
-                st.caption("Eles aparecem sem filial porque a base não está preenchida no cadastro do motorista. Edite o cadastro e informe a filial para que entrem na filial correta.")
+                st.dataframe(_sem[_cols], use_container_width=True, hide_index=True)
+                st.caption("O sistema liga o motorista ao cadastro pelo NOME EXATO. Se o nome na planilha de abastecimento for diferente do cadastro "
+                           "(ex.: “DO” x “DOS”, “DA SILVA” x “SILVA”), ele fica sem filial. Veja abaixo o que acontece com cada um.")
+                _cad_up = cadastro_all["MOTORISTA_CADASTRO"].dropna().astype(str).str.strip().str.upper() if "cadastro_all" in globals() else cadastro["MOTORISTA_CADASTRO"].dropna().astype(str).str.strip().str.upper()
+                _cad_nomes = sorted(set(_cad_up))
+                for _n in sorted(set(_sem[_nome].astype(str).str.strip().str.upper())) if _nome else []:
+                    if _n in set(_cad_nomes):
+                        st.warning(f"**{_n}** está no cadastro com este nome, mas a filial (base) está em branco. Edite o cadastro e informe a filial.")
+                        continue
+                    sug = difflib.get_close_matches(_n, _cad_nomes, n=5, cutoff=0.5)
+                    st.markdown(f"**{_n}** — não existe no cadastro com esse nome exato.")
+                    if is_admin:
+                        esc = st.selectbox("Vincular ao motorista do cadastro", [""] + sug + [x for x in _cad_nomes if x not in sug],
+                                           key=f"alias_sel_{_n}", help="As sugestões mais parecidas aparecem primeiro.")
+                        if esc and st.button(f"Vincular {_n} → {esc}", key=f"alias_btn_{_n}"):
+                            al_at = carregar_aliases_motoristas()
+                            al_at = al_at[al_at["NOME_PLANILHA"].str.strip().str.upper() != _n]
+                            novo_al = pd.DataFrame([{"NOME_PLANILHA": _n, "NOME_CADASTRO": esc, "USUARIO": str(st.session_state.get("auth_usuario", "")),
+                                                     "DATA_VINCULO": datetime.now().strftime("%d/%m/%Y %H:%M:%S")}])
+                            _salvar_csv_com_backup(pd.concat([al_at, novo_al], ignore_index=True)[COLUNAS_ALIASES], ARQUIVO_ALIASES_MOTORISTAS)
+                            st.success("Vínculo salvo.")
+                            st.rerun()
+                    else:
+                        st.caption("Peça ao administrador para vincular este nome ao cadastro.")
 
         km_df=consumo_cat[["KM_TOTAL"]].rename(columns={"KM_TOTAL":"VALOR"}); lit_df=consumo_cat[["LITROS_TOTAL"]].rename(columns={"LITROS_TOTAL":"VALOR"})
         c3,c4=st.columns(2)
