@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v23"
+_VERSAO_BACKUP = "v24"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -2632,7 +2632,7 @@ class RewardEngine:
         pd.Timestamp("1900-01-01")
     )
     base = base.sort_values(
-        ["PLACA_PADRONIZADA", "_DATA_ORDENACAO", "_ORDEM_ORIGINAL"],
+        ["PLACA_PADRONIZADA", "_DATA_ORDENACAO", "KM_ATUAL_NUM", "_ORDEM_ORIGINAL"],
         kind="stable",
     ).copy()
 
@@ -4486,7 +4486,7 @@ def carregar_base(cache_token=None):
 # ================================================================
 ARQUIVO_VALIDACOES = os.path.join(DATA_DIR, "validacoes_abastecimentos.csv")
 ARQUIVO_CONFIG_VALIDACAO = os.path.join(DATA_DIR, "config_validacao.json")
-COLUNAS_VALIDACOES = ["ID_ABASTECIMENTO", "MOTORISTA_VALIDADO", "MOTORISTA_ORIGINAL", "USUARIO", "DATA_VALIDACAO"]
+COLUNAS_VALIDACOES = ["ID_ABASTECIMENTO", "ID_CONTEUDO", "MOTORISTA_VALIDADO", "MOTORISTA_ORIGINAL", "USUARIO", "DATA_VALIDACAO"]
 ARQUIVO_CORRECOES = os.path.join(DATA_DIR, "correcoes_abastecimentos.csv")
 COLUNAS_CORRECOES = ["ID_CORRECAO", "ACAO", "KM_CORRIGIDO", "LITROS_CORRIGIDO", "VALOR_CORRIGIDO", "PLACA_CORRIGIDA", "MOTIVO", "USUARIO", "DATA_CORRECAO"]
 
@@ -4677,8 +4677,27 @@ def aplicar_validacoes_manuais(ab, ev):
     exige = exige & ~ab["EXCLUIDO"]
 
     vdf = carregar_validacoes_abastecimentos()
-    vmap = {str(i): str(m) for i, m in zip(vdf["ID_ABASTECIMENTO"], vdf["MOTORISTA_VALIDADO"]) if str(m).strip()}
-    ids = ab["ID_ABASTECIMENTO"].fillna("").astype(str)
+    leg = vdf["ID_CONTEUDO"].astype(str).str.strip() == ""
+    if leg.any():
+        # Migra validações antigas (que apontavam para a posição da linha) para o identificador por conteúdo.
+        # Só migra se o motorista original da linha atual for o mesmo que foi registrado: evita validar a linha errada.
+        col_orig = "MOTORISTA_ABASTECIMENTO_ORIGINAL" if "MOTORISTA_ABASTECIMENTO_ORIGINAL" in ab.columns else "CONDUTOR_NORMALIZADO"
+        por_id = ab.drop_duplicates("ID_ABASTECIMENTO").set_index(ab.drop_duplicates("ID_ABASTECIMENTO")["ID_ABASTECIMENTO"].fillna("").astype(str))
+        for i_ in vdf.index[leg]:
+            rid = str(vdf.at[i_, "ID_ABASTECIMENTO"])
+            if rid in por_id.index:
+                if DataUtils.normalizar_texto(por_id.at[rid, col_orig]) == DataUtils.normalizar_texto(vdf.at[i_, "MOTORISTA_ORIGINAL"]):
+                    vdf.at[i_, "ID_CONTEUDO"] = por_id.at[rid, "ID_CORRECAO"]
+        ok_m = vdf["ID_CONTEUDO"].astype(str).str.strip() != ""
+        if (~ok_m).any():
+            try:
+                vdf[~ok_m].to_csv(ARQUIVO_VALIDACOES.replace(".csv", "_nao_migradas.csv"), index=False, encoding="utf-8-sig")
+            except Exception:
+                pass
+        vdf = vdf[ok_m].copy()
+        _salvar_csv_com_backup(vdf[COLUNAS_VALIDACOES], ARQUIVO_VALIDACOES)
+    vmap = {str(i): str(m) for i, m in zip(vdf["ID_CONTEUDO"], vdf["MOTORISTA_VALIDADO"]) if str(m).strip()}
+    ids = ab["ID_CORRECAO"].astype(str)
     validado = ids.isin(vmap)
     novo = ids.map(vmap)
     novo_norm = novo.fillna("").apply(DataUtils.normalizar_texto)
@@ -4705,7 +4724,8 @@ def aplicar_validacoes_manuais(ab, ev):
             print(f"Aviso: não foi possível recalcular o consumo com as correções: {exc}")
     if ev is not None and not ev.empty and "ID_ABASTECIMENTO" in ev.columns:
         ev = ev.copy()
-        eids = ev["ID_ABASTECIMENTO"].fillna("").astype(str)
+        _idmap = dict(zip(ab["ID_ABASTECIMENTO"].fillna("").astype(str), ids))
+        eids = ev["ID_ABASTECIMENTO"].fillna("").astype(str).map(_idmap).fillna("")
         ev_val = eids.isin(vmap)
         if ev_val.any():
             n_ = eids.map(vmap)
@@ -4721,7 +4741,7 @@ def aplicar_validacoes_manuais(ab, ev):
 def _view_validacao(df, col_motor):
     mot = df["MOTORISTA_CONSIDERADO"].fillna("").astype(str).replace({"": None})
     return pd.DataFrame({
-        "ID": df["ID_ABASTECIMENTO"].astype(str).values,
+        "ID": df["ID_CORRECAO"].astype(str).values,
         "VALIDAR": df["STATUS_VALIDACAO_MANUAL"].isin(["VALIDADO", "CORRIGIDO"]).values,
         "DATA": pd.to_datetime(df["DATA_FILTRO"], errors="coerce").dt.strftime("%d/%m/%Y").values,
         "PLACA": df["PLACA_PADRONIZADA"].astype(str).values,
@@ -4831,14 +4851,14 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     base_troca = sub.head(500)
     orig_col = base_troca.get("MOTORISTA_ABASTECIMENTO_ORIGINAL", base_troca["CONDUTOR_NORMALIZADO"]).astype(str)
     rotulos = {}
-    for i_, d_, p_, l_, k_, m_ in zip(base_troca["ID_ABASTECIMENTO"].astype(str),
+    for i_, d_, p_, l_, k_, m_ in zip(base_troca["ID_CORRECAO"].astype(str),
                                       pd.to_datetime(base_troca["DATA_FILTRO"], errors="coerce").dt.strftime("%d/%m/%Y"),
                                       base_troca["PLACA_PADRONIZADA"].astype(str),
                                       pd.to_numeric(base_troca.get("QTDE_NUM"), errors="coerce").fillna(0),
                                       pd.to_numeric(base_troca.get("KM_ATUAL_NUM"), errors="coerce").fillna(0),
                                       base_troca["MOTORISTA_CONSIDERADO"].fillna("").astype(str)):
         rotulos[i_] = f"{d_} | {p_} | {l_:.1f} L | {k_:.0f} km | {m_ or '(sem motorista)'}"
-    for i_, s_ in zip(base_troca["ID_ABASTECIMENTO"].astype(str), base_troca["SUSPEITA"].astype(str)):
+    for i_, s_ in zip(base_troca["ID_CORRECAO"].astype(str), base_troca["SUSPEITA"].astype(str)):
         if s_.strip() and i_ in rotulos:
             rotulos[i_] += f"  ⚠️ {s_}"
     # Seleções antigas (de outro filtro/página) que não existem mais na lista atual são descartadas
@@ -4849,11 +4869,11 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     ids_troca = st.multiselect("Abastecimento(s) a trocar", list(rotulos.keys()), format_func=lambda x: rotulos.get(x, x), key="troca_ids")
     novo_mot = st.selectbox("Passar para o motorista (digite para buscar)", [""] + opcoes, key="troca_mot")
     if st.button("🔁 Trocar motorista e validar", key="troca_btn", disabled=not (ids_troca and novo_mot)):
-        orig_map = dict(zip(base_troca["ID_ABASTECIMENTO"].astype(str), orig_col))
+        orig_map = dict(zip(base_troca["ID_CORRECAO"].astype(str), orig_col))
         atual_t = carregar_validacoes_abastecimentos()
-        atual_t = atual_t[~atual_t["ID_ABASTECIMENTO"].isin(ids_troca)]
+        atual_t = atual_t[~atual_t["ID_CONTEUDO"].isin(ids_troca)]
         novas_t = pd.DataFrame({
-            "ID_ABASTECIMENTO": ids_troca,
+            "ID_CONTEUDO": ids_troca,
             "MOTORISTA_VALIDADO": novo_mot,
             "MOTORISTA_ORIGINAL": [orig_map.get(i, "") for i in ids_troca],
             "USUARIO": str(st.session_state.get("auth_usuario", "")),
@@ -4868,7 +4888,7 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
     st.caption("Se o KM veio errado na planilha, informe o KM correto: o consumo (km rodado entre abastecimentos) é recalculado com o valor corrigido. "
                "Se o lançamento estiver duplicado, exclua-o (ele deixa de contar em litros, valor e consumo). Litros e valor também podem ser ajustados.")
     alvo = st.selectbox("Abastecimento", [""] + list(rotulos.keys()), format_func=lambda x: rotulos.get(x, "— escolha —"), key="corr_id")
-    _linhas_alvo = base_troca[base_troca["ID_ABASTECIMENTO"].astype(str) == alvo] if alvo else base_troca.iloc[0:0]
+    _linhas_alvo = base_troca[base_troca["ID_CORRECAO"].astype(str) == alvo] if alvo else base_troca.iloc[0:0]
     if alvo and _linhas_alvo.empty:
         st.info("Esse abastecimento não está mais na lista com os filtros atuais. Escolha novamente.")
     elif alvo:
@@ -4935,9 +4955,9 @@ def _render_validacao_abastecimentos(dt_ini, dt_fim):
             st.warning(f"{int(sem_mot.sum())} abastecimento(s) sem motorista foram ignorados: escolha o motorista antes de validar.")
             marcados = marcados[~sem_mot]
         atual = carregar_validacoes_abastecimentos()
-        atual = atual[~atual["ID_ABASTECIMENTO"].isin(marcados["ID"].astype(str).tolist() + desmarcados)]
+        atual = atual[~atual["ID_CONTEUDO"].isin(marcados["ID"].astype(str).tolist() + desmarcados)]
         novas = pd.DataFrame({
-            "ID_ABASTECIMENTO": marcados["ID"].astype(str).values,
+            "ID_CONTEUDO": marcados["ID"].astype(str).values,
             "MOTORISTA_VALIDADO": marcados[col_motor].astype(str).values,
             "MOTORISTA_ORIGINAL": marcados["ORIGINAL NA PLANILHA"].astype(str).values,
             "USUARIO": str(st.session_state.get("auth_usuario", "")),
