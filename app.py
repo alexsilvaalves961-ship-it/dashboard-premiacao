@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v24"
+_VERSAO_BACKUP = "v26"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -1211,6 +1211,12 @@ def carregar_desclassificacoes() -> pd.DataFrame:
       for c in colunas:
         if c not in df.columns:
           df[c] = ""
+      # Critério 5 vale PONTOS (só do 6 ao 15 é desclassificatório): corrige lançamentos antigos
+      num_crit = pd.to_numeric(df["CRITERIO"].astype(str).str.extract(r"^\s*(\d+)\s*-")[0], errors="coerce")
+      m5 = num_crit.eq(5)
+      if m5.any():
+        df.loc[m5 & df["TIPO_IMPACTO"].astype(str).str.upper().eq("DESCLASSIFICADO"), "TIPO_IMPACTO"] = "PONTOS"
+        df.loc[m5, "CRITERIO"] = df.loc[m5, "CRITERIO"].astype(str).str.replace(r"\s*\[DESCLASSIFICADO\]", " (1 Ponto/evento até 129)", regex=True)
       return df[colunas]
     except Exception as e:
       print(f"Erro ao carregar desclassificações: {e}")
@@ -3039,7 +3045,7 @@ CRITERIOS_PILAR_1 = [
     ),
     (
         "5 - Distração com freadas bruscas, risco de colisão ou manobra perigosa"
-        " [DESCLASSIFICADO]"
+        " (1 Ponto/evento até 129)"
     ),
     "6 - Uso do celular em direção [DESCLASSIFICADO]",
     "7 - Estacionar ou parada com veículo em L [DESCLASSIFICADO]",
@@ -3262,6 +3268,89 @@ def aplicar_regras_gerais(
 # ================================================================
 # GERADOR DE DATAFRAME EXCLUSIVO DO RH
 # ================================================================
+def _contagens_abastecimento_periodo():
+  """Abastecimentos por motorista no período selecionado: total e pendentes de validação."""
+  try:
+    ab = globals().get("abastecimentos"); di = globals().get("dt_ini"); df_ = globals().get("dt_fim")
+    if ab is None or ab.empty or di is None or df_ is None or "CONDUTOR_NORMALIZADO" not in ab.columns:
+      return {}, {}
+    d = pd.to_datetime(ab["DATA_FILTRO"], errors="coerce").dt.normalize()
+    sub = ab.loc[(d >= pd.Timestamp(di)) & (d <= pd.Timestamp(df_))]
+    nome = sub["CONDUTOR_NORMALIZADO"].fillna("").astype(str).str.strip().str.upper()
+    tot = nome.value_counts().to_dict()
+    pend = {}
+    if "STATUS_VALIDACAO_MANUAL" in sub.columns:
+      pend = nome[sub["STATUS_VALIDACAO_MANUAL"] == "PENDENTE"].value_counts().to_dict()
+    return tot, pend
+  except Exception:
+    return {}, {}
+
+
+def _motivo_sem_premio_linha(r, pend=None):
+  """Explica por que o motorista (linha do resultado) ficou sem prêmio. Vazio se recebeu prêmio."""
+  try:
+    if float(pd.to_numeric(r.get("PREMIO", 0), errors="coerce") or 0) > 0:
+      return ""
+  except Exception:
+    pass
+  st_ = str(r.get("STATUS_PREMIO", "")).strip().upper()
+  mot = str(r.get("MOTIVO_DESCLASSIFICACAO", "") or "").strip()
+  if mot.upper().startswith("ELEGÍVEL") or mot.upper().startswith("ELEGIVEL"):
+    mot = ""
+  media = pd.to_numeric(r.get("MEDIA_CALCULADA"), errors="coerce")
+  faixa = pd.to_numeric(r.get("MEDIA_FAIXA"), errors="coerce")
+  if mot.startswith("Média de consumo abaixo") and pd.notna(media):
+    mot = f"Média {media:.2f} km/L abaixo do mínimo da categoria" + (f" ({faixa:.2f} km/L)" if pd.notna(faixa) else "")
+  if mot:
+    texto = mot
+  elif st_ == "SEM MEDIA":
+    texto = "Sem média válida: sem consumo/KM válido na competência"
+  elif st_ == "SEM FAIXA":
+    texto = "Sem faixa de prêmio cadastrada para a categoria/base"
+  elif st_ == "DESCLASSIFICADO":
+    texto = "Desclassificado"
+  else:
+    dias_ef = pd.to_numeric(r.get("DIAS_EFETIVOS"), errors="coerce")
+    bruto = pd.to_numeric(r.get("PREMIO_BRUTO"), errors="coerce")
+    if pd.notna(dias_ef) and dias_ef <= 0:
+      texto = "Ausência (férias/atestado) no período inteiro"
+    elif pd.notna(bruto) and bruto > 0:
+      texto = "Descontos (excesso de velocidade/jornada) zeraram o prêmio"
+    else:
+      texto = "Prêmio zerado pela faixa de consumo"
+  if pend:
+    n = int(pend.get(str(r.get("MOTORISTA", "")).strip().upper(), 0) or 0)
+    if n:
+      texto += f" · {n} abastecimento(s) aguardando validação"
+  return texto
+
+
+def _motivo_sem_resultado(nome_up, tot, pend):
+  """Motorista ativo que nem aparece no resultado da competência."""
+  n_pend = int(pend.get(nome_up, 0) or 0)
+  n_tot = int(tot.get(nome_up, 0) or 0)
+  if n_pend:
+    return f"{n_pend} abastecimento(s) aguardando validação"
+  if n_tot:
+    return f"{n_tot} abastecimento(s) no período, sem consumo válido para calcular a média"
+  return "Sem abastecimento na competência"
+
+
+def tooltip_sem_premio_html(res_f):
+  """Balão (ao passar o mouse) com os motoristas sem prêmio e o motivo."""
+  try:
+    df = res_f[pd.to_numeric(res_f["PREMIO"], errors="coerce").fillna(0) <= 0]
+    if df.empty:
+      return ""
+    _tot, pend = _contagens_abastecimento_periodo()
+    linhas = [f'<div class="tip-row"><b>{_esc(r["MOTORISTA"])}</b><span>{_esc(_motivo_sem_premio_linha(r, pend))}</span></div>'
+              for _, r in df.sort_values("MOTORISTA").head(60).iterrows()]
+    mais = f'<div class="tip-more">+{len(df) - 60} outros: veja o Relatório RH</div>' if len(df) > 60 else ""
+    return '<div class="ov-tip"><div class="tip-title">Motoristas sem prêmio e o motivo</div>' + "".join(linhas) + mais + "</div>"
+  except Exception:
+    return ""
+
+
 def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
   """Gera o relatório do RH a partir do cadastro oficial completo.
 
@@ -3270,7 +3359,7 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
   Quando não houver prêmio calculado para a competência, o valor fica R$ 0,00.
   A filial e o código funcional vêm exclusivamente da Gestão de Cadastros.
   """
-  colunas_saida = ["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO"]
+  colunas_saida = ["CÓDIGO FUNCIONAL", "NOME", "FILIAL", "VALOR PAGO", "MOTIVO SEM PRÊMIO"]
 
   try:
     cad_rh = (cadastro_all.copy() if isinstance(globals().get("cadastro_all"), pd.DataFrame)
@@ -3307,6 +3396,13 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
     else:
       premio_por_motorista = pd.DataFrame(columns=["_MOTORISTA_RH", "PREMIO"])
 
+    tot_ab, pend_ab = _contagens_abastecimento_periodo()
+    motivos_calc = {}
+    if not calc.empty and "_MOTORISTA_RH" in calc.columns:
+      for chave_m, g_m in calc.groupby("_MOTORISTA_RH"):
+        if g_m["PREMIO"].sum() <= 0:
+          motivos_calc[chave_m] = _motivo_sem_premio_linha(g_m.iloc[0], pend_ab)
+
     rh = cad_rh[["_MOTORISTA_RH", "MOTORISTA_CADASTRO", "BASE_CADASTRO", "CODIGO_FUNCIONAL"]].copy()
     rh = rh.merge(premio_por_motorista, on="_MOTORISTA_RH", how="left")
     rh["PREMIO"] = pd.to_numeric(rh["PREMIO"], errors="coerce").fillna(0.0)
@@ -3330,6 +3426,10 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
         "NOME": rh["MOTORISTA_CADASTRO"],
         "FILIAL": rh["BASE_CADASTRO"].fillna("").astype(str),
         "VALOR PAGO": rh["PREMIO"].map(formatar_valor_pago),
+        "MOTIVO SEM PRÊMIO": [
+            "" if prem > 0 else (motivos_calc.get(k) or _motivo_sem_resultado(k, tot_ab, pend_ab))
+            for k, prem in zip(rh["_MOTORISTA_RH"], rh["PREMIO"])
+        ],
     })
     return out.sort_values(["FILIAL", "NOME"], kind="stable").reset_index(drop=True)
   except Exception as exc:
@@ -4213,6 +4313,16 @@ _CSS_MODERNO = """
   padding:12px 14px;background:color-mix(in srgb,var(--pc) 8%,var(--surface2));}
 .ov-pill b{display:block;font-size:1.25rem;color:var(--pc);font-weight:850;letter-spacing:-.3px;}
 .stApp .ov-pill span{font-size:.75rem;color:var(--muted);}
+.ov-pill{position:relative;}
+.ov-tip{display:none;position:absolute;z-index:1000;top:calc(100% + 8px);left:0;width:min(480px,86vw);max-height:320px;overflow-y:auto;
+  background:var(--surface2);border:1px solid var(--line);border-radius:14px;padding:12px 14px;box-shadow:0 14px 40px rgba(0,0,0,.45);text-align:left;}
+.ov-pill.has-tip:hover .ov-tip{display:block;}
+.ov-pill.has-tip{cursor:help;}
+.ov-pill .ov-tip .tip-title{font-size:.72rem;font-weight:850;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;}
+.ov-pill .ov-tip .tip-row{padding:7px 0;border-top:1px solid var(--line);}
+.ov-pill .ov-tip b{display:block;font-size:.8rem;color:var(--text);letter-spacing:0;font-weight:800;}
+.stApp .ov-pill .ov-tip span{display:block;font-size:.76rem;color:var(--muted);margin-top:2px;}
+.ov-pill .ov-tip .tip-more{padding-top:8px;font-size:.74rem;color:var(--muted);}
 """
 
 
@@ -4299,7 +4409,7 @@ def barras_html(titulo, sub, df, fmt, cor_idx=0, maxn=7):
     st.markdown(html_.replace("$", "&#36;"), unsafe_allow_html=True)
 
 
-def overview_html(total, premiados, media_premio, f_premio, f_km, f_media, brl):
+def overview_html(total, premiados, media_premio, f_premio, f_km, f_media, brl, tip_sem=""):
     import math
     pct = (premiados / total * 100) if total else 0.0
     r = 52
@@ -4310,7 +4420,7 @@ def overview_html(total, premiados, media_premio, f_premio, f_km, f_media, brl):
            f'<text x="70" y="68" text-anchor="middle" font-size="26" font-weight="800" style="fill:var(--text)">{pct:.1f}%</text>'
            f'<text x="70" y="88" text-anchor="middle" font-size="10" font-weight="700" style="fill:var(--muted)">COM PRÊMIO</text></svg>')
     pills = (f'<div class="ov-pill" style="--pc:var(--k2)"><b>{premiados}</b><span>Motoristas com prêmio</span></div>'
-             f'<div class="ov-pill" style="--pc:var(--k3)"><b>{total - premiados}</b><span>Sem prêmio</span></div>'
+             f'<div class="ov-pill{" has-tip" if tip_sem else ""}" style="--pc:var(--k3)"><b>{total - premiados}</b><span>Sem prêmio{" ⓘ" if tip_sem else ""}</span>{tip_sem}</div>'
              f'<div class="ov-pill" style="--pc:var(--k1)"><b>{_esc(brl(media_premio))}</b><span>Prêmio médio (premiados)</span></div>'
              f'<div class="ov-pill" style="--pc:var(--k4)"><b>{_esc(f_media)}</b><span>Média KM/L da frota</span></div>')
     html_ = (f'<div class="overview">{svg}<div class="ov-main"><div class="ov-eyebrow">Visão geral da competência</div>'
@@ -5308,7 +5418,7 @@ if _ABA_ATIVA == 0:
         consumo_cat=res_f.groupby("CATEGORIA",dropna=False)[["KM_TOTAL","LITROS_TOTAL"]].sum().sort_values("KM_TOTAL",ascending=False); consumo_cat.index=consumo_cat.index.fillna("SEM CATEGORIA")
 
         _prem=pd.to_numeric(res_f["PREMIO"],errors="coerce").fillna(0)
-        st.markdown(overview_html(len(res_f),int((_prem>0).sum()),float(_prem[_prem>0].mean()) if (_prem>0).any() else 0.0,f_premio,f_km,f_media,_brl),unsafe_allow_html=True)
+        st.markdown(overview_html(len(res_f),int((_prem>0).sum()),float(_prem[_prem>0].mean()) if (_prem>0).any() else 0.0,f_premio,f_km,f_media,_brl,tooltip_sem_premio_html(res_f)),unsafe_allow_html=True)
 
         c1,c2=st.columns(2)
         with c1: barras_html("💰 Prêmio por Categoria",f"Total {_brl(premio_cat['VALOR'].sum())}",premio_cat,_brl,0)
@@ -6008,7 +6118,7 @@ if _ABA_ATIVA == 10:
             do=st.text_input("Observação",key="do")
             if st.button("➕ Lançar",key="dadd", disabled=(not is_admin)):
                 num=int(str(dc).split('-')[0].strip()) if '-' in str(dc) else 1
-                ti="DESCLASSIFICADO" if num>=5 else "PONTOS"
+                ti="DESCLASSIFICADO" if num>=6 else "PONTOS"
                 novo=pd.DataFrame([{
                     "MOTORISTA":dm,
                     "CRITERIO":dc,
