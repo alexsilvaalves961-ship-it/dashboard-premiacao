@@ -625,7 +625,7 @@ def _salvar_csv_com_backup(df: pd.DataFrame, caminho: str):
 import time as _time
 import json as _json
 
-_VERSAO_BACKUP = "v26"
+_VERSAO_BACKUP = "v27"
 
 _EXT_DADOS = {".csv", ".parquet", ".json", ".db", ".sqlite", ".sqlite3", ".txt"}
 _NOMES_IGNORADOS = {"requirements.txt", "runtime.txt", "packages.txt", "readme.txt", "license.txt"}
@@ -3351,7 +3351,7 @@ def tooltip_sem_premio_html(res_f):
     return ""
 
 
-def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
+def gerar_tabela_rh(df_resumo: pd.DataFrame, filtros: dict = None) -> pd.DataFrame:
   """Gera o relatório do RH a partir do cadastro oficial completo.
 
   Regra: todo motorista ATIVO no cadastro oficial deve aparecer no RH,
@@ -3380,6 +3380,18 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
           cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto) == FILIAL_ACESSO
       ].copy()
 
+    # Filtros laterais (filial, motorista, categoria, placa) também valem para o RH
+    restringir_por_resultado = False
+    if filtros:
+      f_fil = filtros.get("filial")
+      if f_fil and f_fil != "TODAS" and "BASE_CADASTRO" in cad_rh.columns:
+        cad_rh = cad_rh[cad_rh["BASE_CADASTRO"].apply(DataUtils.normalizar_texto) == DataUtils.normalizar_texto(f_fil)].copy()
+      f_mot = filtros.get("motorista")
+      if f_mot and f_mot != "TODOS":
+        cad_rh = cad_rh[cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto) == DataUtils.normalizar_texto(f_mot)].copy()
+      f_cat = filtros.get("categoria")
+      restringir_por_resultado = bool(str(filtros.get("placa") or "").strip()) or bool(f_cat and f_cat != "TODAS")
+
     cad_rh["_MOTORISTA_RH"] = cad_rh["MOTORISTA_CADASTRO"].apply(DataUtils.normalizar_texto)
     cad_rh = cad_rh[cad_rh["_MOTORISTA_RH"].ne("")].copy()
     cad_rh = cad_rh.drop_duplicates("_MOTORISTA_RH", keep="last")
@@ -3403,6 +3415,9 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
         if g_m["PREMIO"].sum() <= 0:
           motivos_calc[chave_m] = _motivo_sem_premio_linha(g_m.iloc[0], pend_ab)
 
+    if restringir_por_resultado:
+      # Categoria/placa pertencem aos abastecimentos: só entram motoristas que aparecem no resultado filtrado
+      cad_rh = cad_rh[cad_rh["_MOTORISTA_RH"].isin(set(premio_por_motorista["_MOTORISTA_RH"]))].copy()
     rh = cad_rh[["_MOTORISTA_RH", "MOTORISTA_CADASTRO", "BASE_CADASTRO", "CODIGO_FUNCIONAL"]].copy()
     rh = rh.merge(premio_por_motorista, on="_MOTORISTA_RH", how="left")
     rh["PREMIO"] = pd.to_numeric(rh["PREMIO"], errors="coerce").fillna(0.0)
@@ -3435,6 +3450,69 @@ def gerar_tabela_rh(df_resumo: pd.DataFrame) -> pd.DataFrame:
   except Exception as exc:
     print(f"Erro ao gerar tabela RH completa: {exc}")
     return pd.DataFrame(columns=colunas_saida)
+
+
+def _valor_rh_float(v):
+  try:
+    return float(str(v).upper().replace("R$", "").replace(" ", "").replace(".", "").replace(",", "."))
+  except Exception:
+    return 0.0
+
+
+def _rh_para_exportacao(df: pd.DataFrame, incluir_motivo: bool = True) -> pd.DataFrame:
+  out = df.copy()
+  if "VALOR PAGO" in out.columns:
+    out["VALOR PAGO"] = out["VALOR PAGO"].map(lambda v: f"{_valor_rh_float(v):.2f}".replace(".", ","))
+  if not incluir_motivo and "MOTIVO SEM PRÊMIO" in out.columns:
+    out = out.drop(columns=["MOTIVO SEM PRÊMIO"])
+  return out
+
+
+def gerar_pdf_rh(df: pd.DataFrame, titulo: str, subtitulo: str, rodape: str) -> bytes:
+  """PDF (A4 paisagem) do relatório do RH, sem dependências extras (usa matplotlib)."""
+  import io, textwrap
+  import matplotlib
+  from matplotlib.backends.backend_pdf import PdfPages
+  from matplotlib.figure import Figure
+  cols = list(df.columns)
+  pesos = {"CÓDIGO FUNCIONAL": 0.12, "NOME": 0.28, "FILIAL": 0.14, "VALOR PAGO": 0.12, "MOTIVO SEM PRÊMIO": 0.34}
+  larg = np.array([pesos.get(c, 0.2) for c in cols], dtype=float)
+  larg = larg / larg.sum()
+  quebra = {"NOME": 34, "MOTIVO SEM PRÊMIO": 58, "FILIAL": 18}
+  linhas = []
+  for _, r in df.iterrows():
+    cel = [textwrap.fill(str(r[c]), quebra.get(c, 40)) if str(r[c]) else "" for c in cols]
+    linhas.append((cel, max(x.count("\n") + 1 for x in cel)))
+  altura_util, alt_cab = 0.95, 0.045
+  paginas, atual, acum = [], [], alt_cab
+  for cel, n in linhas:
+    h = 0.024 + 0.016 * (n - 1)
+    if acum + h > altura_util and atual:
+      paginas.append(atual); atual, acum = [], alt_cab
+    atual.append((cel, h)); acum += h
+  paginas.append(atual)
+  buf = io.BytesIO()
+  with PdfPages(buf) as pdf:
+    for i, pag in enumerate(paginas):
+      fig = Figure(figsize=(11.69, 8.27))
+      fig.text(0.04, 0.95, titulo, fontsize=15, weight="bold", color="#17215C")
+      fig.text(0.04, 0.925, subtitulo, fontsize=8.5, color="#555555")
+      ax = fig.add_axes([0.04, 0.07, 0.92, 0.84]); ax.axis("off")
+      tab = ax.table(cellText=[c for c, _ in pag] or [[""] * len(cols)], colLabels=cols, colWidths=list(larg), loc="upper left", cellLoc="left")
+      tab.auto_set_font_size(False); tab.set_fontsize(7.5)
+      for (rr, cc), cell in tab.get_celld().items():
+        cell.set_edgecolor("#D0D5DD"); cell.set_linewidth(0.5)
+        if rr == 0:
+          cell.set_height(alt_cab); cell.set_facecolor("#17215C"); cell.get_text().set_color("white"); cell.get_text().set_weight("bold")
+        else:
+          cell.set_height(pag[rr - 1][1] if pag else 0.024)
+          cell.set_facecolor("#F5F7FA" if rr % 2 == 0 else "white")
+          if cols[cc] == "VALOR PAGO" and _valor_rh_float(cell.get_text().get_text()) == 0.0:
+            cell.get_text().set_color("#C0392B"); cell.get_text().set_weight("bold")
+      fig.text(0.04, 0.03, rodape, fontsize=8.5, weight="bold", color="#17215C")
+      fig.text(0.96, 0.03, f"Página {i + 1}/{len(paginas)}", fontsize=8, ha="right", color="#555555")
+      pdf.savefig(fig)
+  return buf.getvalue()
 
 
 def estilizar_rh_zerados(df: pd.DataFrame):
@@ -6028,9 +6106,38 @@ if _ABA_ATIVA == 4:
         else: st.info("Nenhum mapeamento manual disponível para a filial autorizada nesta competência.")
 if _ABA_ATIVA == 11:
     st.subheader("Relatório RH")
-    st.caption("Relação de todos os motoristas ATIVOS no cadastro oficial. Férias, atestados ou ausência de abastecimento não retiram o motorista do RH; nesses casos o valor fica R$ 0,00.")
-    st.caption(f"Motoristas ativos no cadastro: {len(rh_view)}")
-    st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
+    _filtros_rh = {"motorista": mot, "placa": placa, "categoria": cat, "filial": filial}
+    rh_view = gerar_tabela_rh(res_f, filtros=_filtros_rh)
+    _ativos = [f"{n}: {v}" for n, v in (("Filial", filial), ("Motorista", mot), ("Categoria", cat)) if v and v not in ("TODAS", "TODOS")]
+    if str(placa or "").strip():
+        _ativos.append(f"Placa: {placa}")
+    st.caption("Relação dos motoristas ATIVOS no cadastro oficial, respeitando os filtros da lateral. Férias, atestados ou ausência de abastecimento não retiram o motorista do RH; nesses casos o valor fica R$ 0,00.")
+    st.caption("Filtros aplicados: " + (" · ".join(_ativos) if _ativos else "nenhum (todos os motoristas ativos)"))
+    _sub_rel, _sub_exp = st.tabs(["📋 Relatório", "📤 Exportar (PDF / CSV)"])
+    with _sub_rel:
+        st.caption(f"Motoristas listados: {len(rh_view)}")
+        st.dataframe(estilizar_rh_zerados(rh_view),use_container_width=True,hide_index=True)
+    with _sub_exp:
+        st.caption("Exporta exatamente o que está no relatório, com os filtros atuais da lateral.")
+        _inc_mot = st.checkbox("Incluir a coluna “Motivo sem prêmio”", value=True, key="rh_exp_motivo")
+        _exp_df = _rh_para_exportacao(rh_view, _inc_mot)
+        _tot_rh = sum(_valor_rh_float(v) for v in rh_view["VALOR PAGO"]) if "VALOR PAGO" in rh_view.columns else 0.0
+        _tot_txt = f"R$ {_tot_rh:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        _nome_base = f"relatorio_rh_{dt_ini.strftime('%d%m%Y')}_{dt_fim.strftime('%d%m%Y')}"
+        st.metric("Total a pagar no relatório", _tot_txt)
+        _ce, _cp = st.columns(2)
+        _ce.download_button("⬇️ Baixar CSV (Excel)", data=_exp_df.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                            file_name=_nome_base + ".csv", mime="text/csv", use_container_width=True, disabled=rh_view.empty, key="rh_csv_dl")
+        if _cp.button("📄 Gerar PDF", use_container_width=True, disabled=rh_view.empty, key="rh_pdf_gerar"):
+            _sub = (f"Competência {dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')} · "
+                    + ("Filtros: " + " · ".join(_ativos) if _ativos else "Todos os motoristas ativos")
+                    + f" · Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            st.session_state["rh_pdf"] = (_nome_base + ".pdf", gerar_pdf_rh(_exp_df, "Relatório RH — Prêmio de Motoristas", _sub,
+                                                                              f"{len(rh_view)} motorista(s) · Total: {_tot_txt}"))
+        if st.session_state.get("rh_pdf"):
+            st.download_button("⬇️ Baixar o PDF gerado", data=st.session_state["rh_pdf"][1], file_name=st.session_state["rh_pdf"][0],
+                               mime="application/pdf", use_container_width=True, key="rh_pdf_dl")
+            st.caption("Se mudar filtros ou a competência, clique em “Gerar PDF” novamente.")
 if _ABA_ATIVA == 2:
     st.subheader("Detalhamento dos Abastecimentos")
     st.caption("O motorista considerado no cálculo é conciliado pelo ciclo entre abastecimentos: KM anterior → viagens realizadas → KM do abastecimento atual. Se o ciclo envolver mais de um motorista, fica pendente para validação.")
